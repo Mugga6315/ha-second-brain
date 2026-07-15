@@ -1,0 +1,44 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Second Brain",
+        "description": "Persistent markdown knowledge store for your voice assistant. A 'second_brain' folder will be created in the chosen location.",
+        "data": {
+          "store_location": "Store location"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "Second Brain is already configured. Only one instance is supported."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Second Brain options",
+        "description": "Adjust prompt budgets and consolidation settings. Leave LLM fields empty to disable the consolidator.",
+        "data": {
+          "core_chars": "Max chars of CORE.md in prompt",
+          "rules_chars": "Max chars of rules in prompt",
+          "index_chars": "Max chars of INDEX.md in prompt",
+          "note_chars": "Max chars when reading a note",
+          "llm_base_url": "LLM base URL for consolidation (e.g. http://localhost:11434/v1)",
+          "llm_api_key": "LLM API key (optional, leave empty for local servers)",
+          "consolidate_time": "Time to run nightly consolidation"
+        }
+      },
+      "model": {
+        "title": "Select consolidation model",
+        "description": "Available models from {url}. You can also type a custom model name.",
+        "data": {
+          "llm_model": "Model"
+        }
+      }
+    },
+    "error": {
+      "llm_incomplete": "Both URL and model are required when configuring the consolidator.",
+      "llm_unreachable": "LLM endpoint validation failed: {error}"
+    }
+  }
+}

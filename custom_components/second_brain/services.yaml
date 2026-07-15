@@ -1,0 +1,3 @@
+consolidate:
+  name: Consolidate memories
+  description: Run the consolidation agent to merge raw memories into curated wiki pages.

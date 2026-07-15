@@ -1,0 +1,12 @@
+{
+  "domain": "second_brain",
+  "name": "Second Brain",
+  "config_flow": true,
+  "dependencies": [],
+  "integration_type": "service",
+  "documentation": "https://github.com/Mugga6315/ha-second-brain",
+  "issue_tracker": "https://github.com/Mugga6315/ha-second-brain/issues",
+  "codeowners": ["@Mugga6315"],
+  "requirements": [],
+  "version": "1.0.0"
+}

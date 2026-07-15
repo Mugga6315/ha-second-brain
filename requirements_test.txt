@@ -1,0 +1,6 @@
+homeassistant
+hassil
+home-assistant-intents
+voluptuous
+pytest
+pytest-asyncio
