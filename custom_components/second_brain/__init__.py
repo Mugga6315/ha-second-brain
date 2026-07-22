@@ -20,6 +20,7 @@ from .const import (
     DEFAULT_CONSOLIDATE_TIME,
     DOMAIN,
     INDEX_CHARS,
+    LOGGER,
     NOTE_CHARS,
     RULES_CHARS,
     STORE_FOLDER,
@@ -57,7 +58,18 @@ async def async_setup_entry(hass, entry: ConfigEntry) -> bool:
             entry, data={**entry.data, "initialized": True}
         )
 
-    api = BrainAPI(hass, store)
+    # --- MCP proxy seam (optional feature; see docs/MCP.md to remove) ---
+    # Guarded: a broken/absent optional feature must not stop the integration
+    # from loading. Worst case the store still works without query_ha.
+    proxy, mcp_read_only = None, True
+    try:
+        from .mcp_proxy import build_proxy, read_only_from_entry
+
+        proxy, mcp_read_only = build_proxy(hass, entry), read_only_from_entry(entry)
+    except Exception:
+        LOGGER.exception("MCP proxy unavailable — loading without query_ha")
+    api = BrainAPI(hass, store, proxy=proxy, mcp_read_only=mcp_read_only)
+    # --- end MCP proxy seam ---
     entry.async_on_unload(llm.async_register_api(hass, api))
 
     await _setup_consolidator(hass, entry, store)

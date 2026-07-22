@@ -128,6 +128,18 @@ class SecondBrainOptionsFlow(OptionsFlow):
             self._llm_base_url = base_url
             self._llm_api_key = api_key
 
+            # --- MCP proxy seam (optional feature; see docs/MCP.md to remove) ---
+            from .mcp_proxy import async_validate_options
+
+            mcp_error = await async_validate_options(self.hass, user_input)
+            if mcp_error:
+                return self.async_show_form(
+                    step_id="init",
+                    data_schema=self._init_schema(opts),
+                    errors={"base": "mcp_unreachable"},
+                    description_placeholders={"error": mcp_error},
+                )
+            # --- end MCP proxy seam ---
 
             if base_url:
                 llm_error = await _validate_llm(self.hass, base_url, api_key)
@@ -176,6 +188,9 @@ class SecondBrainOptionsFlow(OptionsFlow):
         )
 
     def _init_schema(self, opts: dict) -> vol.Schema:
+        # --- MCP proxy seam (see docs/MCP.md to remove) ---
+        from .mcp_proxy import options_schema as _mcp_options_schema
+        # --- end MCP proxy seam ---
         return vol.Schema(
             {
                 vol.Required(
@@ -202,6 +217,9 @@ class SecondBrainOptionsFlow(OptionsFlow):
                     CONF_LLM_API_KEY,
                     default=opts.get(CONF_LLM_API_KEY, ""),
                 ): str,
+                # --- MCP proxy seam (see docs/MCP.md to remove) ---
+                **_mcp_options_schema(opts),
+                # --- end MCP proxy seam ---
                 vol.Required(
                     CONF_CONSOLIDATE_TIME,
                     default=opts.get(CONF_CONSOLIDATE_TIME, DEFAULT_CONSOLIDATE_TIME),

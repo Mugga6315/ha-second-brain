@@ -25,6 +25,9 @@
           "note_chars": "Max chars when reading a note",
           "llm_base_url": "LLM base URL for consolidation (e.g. http://localhost:11434/v1)",
           "llm_api_key": "LLM API key (optional, leave empty for local servers)",
+          "mcp_url": "MCP server URL for HA tool proxy (e.g. http://localhost:8123/api/mcp)",
+          "mcp_token": "MCP server bearer token (HA long-lived access token)",
+          "mcp_read_only": "MCP read-only (hide write/control tools from the model)",
           "consolidate_time": "Time to run nightly consolidation"
         }
       },
@@ -38,7 +41,8 @@
     },
     "error": {
       "llm_incomplete": "Both URL and model are required when configuring the consolidator.",
-      "llm_unreachable": "LLM endpoint validation failed: {error}"
+      "llm_unreachable": "LLM endpoint validation failed: {error}",
+      "mcp_unreachable": "MCP server validation failed: {error}"
     }
   }
 }

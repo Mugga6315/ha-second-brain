@@ -103,85 +103,85 @@ dependency.
   tokens) — testing showed deliberation length, not prompt size, is the real
   token hog.
 
-## v2 — HA tool proxy
+## v2 — [x] HA tool proxy (universal MCP passthrough)
 
-**Problem**: External MCP servers (e.g. `mcp_server_http_transport`) expose
-60+ HA tools directly to the LLM. Small local models degrade past ~10 tools.
-The user has no control over which tools are visible or how they're described.
+**Problem**: external MCP servers expose 60-90+ HA tools directly to the LLM.
+Small local models degrade past ~10 tools.
 
-**Decision lean**: build a proxy tool inside Second Brain instead of depending
-on any particular external MCP server component. Second Brain owns the tool
-surface; the external MCP server is an implementation detail that can be
-swapped.
+**Shipped**: one voice-facing `query_ha(tool_name, arguments)` tool that forwards
+verbatim to the MCP server. The LLM sees a single tool whose description is
+generated at runtime from the server's own `tools/list` `inputSchema`.
 
-**Design sketch**:
+**Why the keyword-router sketch below was dropped**: it hardcoded one server's
+schema. Measured against two real servers:
 
-- New voice-facing tool: `query_ha(intent, entity_id?, time_range?, period?)`
-  - One tool, one schema — LLM sees 6 tools total (5 brain + 1 proxy) instead
-    of 65.
-  - The `intent` string maps to an internal router (not an LLM call — a
-    simple keyword/category match, ~20 lines).
-  - Router dispatches to the right MCP tool: `get_state`, `search_entities`,
-    `get_history`, `get_statistics`, `call_service`, etc.
-  - Response is trimmed/summarized before returning to the LLM (e.g.
-    `list_entities` → only entity_id + state, drop verbose attributes).
+| | ganhammar/hass-mcp-server | homeassistant-ai/ha-mcp |
+|---|---|---|
+| tool names | `get_history` | `ha_get_history` |
+| entity param | `entity_id` (string) | `entity_ids` (array) |
+| time format | ISO only | relative (`"4d"`) |
+| statistics | separate `get_statistics` | folded: `get_history(source=statistics)` |
+| annotations | none | none |
 
-- **Routing rules in the store**: a `HA_TOOLS.md` file (like
-  `CONSOLIDATE.md`) maps intent keywords to MCP tool calls. User-editable,
-  no code change to adjust routing. Examples:
-  - "current" / "state" → `get_state`
-  - "find" / "search" → `search_entities`
-  - "past" / "history" / "yesterday" → `get_history`
-  - "trend" / "statistics" / "energy" → `get_statistics`
-  - "turn on" / "turn off" / "control" → `call_service`
+No `_build_args` can serve both. Handing the model the server's advertised schema
+does — verified live: the model reads the generated description and fills correct
+args first try, same code, either server.
 
-- **Connection**: Second Brain reads the MCP server URL from its options
-  (same field or a new one). Uses `aiohttp` to call the MCP HTTP endpoint
-  directly — no dependency on HA's core `mcp` client integration, no
-  dependency on a specific MCP server implementation. If the MCP server is
-  offline/unconfigured, `query_ha` returns a clear error to the LLM.
+**Implementation**:
 
-- **Tool count is the LLM-facing constraint, not capability**: the proxy can
-  route to all 60+ MCP tools internally; the LLM only sees one. Rules.md
-  guides when to call `query_ha` vs brain tools.
+- `QueryHATool(tool_name, arguments)` — passthrough. No routing, no arg building.
+- Description rendered from `inputSchema`: `name(required, [optional]) — desc`.
+- Deleted (~90 lines): `_INTENT_MAP`, `_CANONICAL_ALIASES`, `_route`,
+  `_resolve_tool`, `_build_args`, `_parse_time_range`, `_trim`.
+- Responses capped at `QUERY_HA_MAX_CHARS`. Generic — per-tool field stripping
+  only ever worked on one server's response shape.
+- `mcp_read_only` option (default on) hides write tools. No MCP server observed
+  exposes the spec's `readOnlyHint`/`destructiveHint`, so detection is a
+  name-verb heuristic with a read-prefix override (`get_`/`list_`/`search_`/
+  `describe_` always readable). On ganhammar: 29 of 67 tools hidden.
+- Proxy honours the server-negotiated `protocolVersion`.
 
-- **Alternative considered — tool whitelist at the MCP server**: would require
-  a PR to `mcp_server_http_transport` or a fork. Fragile — ties us to that
-  component. Rejected in favor of the proxy.
+**`HA_TOOLS.md` routing file: not needed.** Its purpose was to keep per-server
+routing out of code; the passthrough removes the routing entirely.
 
-- **Alternative considered — HA core `mcp` client + tool curation**: HA's core
-  `mcp` client creates an `llm.API` from a connected MCP server, but exposes
-  all tools with no filtering. Same bloat problem. Rejected.
+**Open questions — resolved**:
 
-**Open questions for v2**:
-- Should the proxy support `call_service` (write actions), or be read-only
-  (history/state/statistics) with device control staying on the conversation
-  agent's native `Assist` API?
-- Should the router be keyword-based (simple, deterministic) or a cheap LLM
-  call (flexible, adds latency)?
-- How to handle large responses (e.g. `get_history` returning 500 data points)
-  — truncate, summarize, or let the LLM ask for a smaller range?
+- *read-only, or allow writes?* → read-only default; `mcp_read_only=false` opts
+  in. Hides `delete_automation`, `restart_ha`, `save_config_file`,
+  `call_service`, etc.
+- *keyword router or cheap LLM router?* → neither. The model already picks the
+  tool from the schema, so a second LLM call buys nothing.
+- *large responses?* → generic char cap. Summarization stays v3.
 
-## v3 — Response summarization
+**Known test-instance gap**: `sensor.test_solar_production_today` has no
+long-term statistics recorded, so `get_statistics` correctly returns `[]`.
+Solar demos need stats on that sensor, or a different entity.
 
-**Problem**: The HA tool proxy passes raw MCP responses through to the LLM.
-For large responses (e.g. `get_history` returning 100+ state changes), the
-LLM has to process and count everything itself — burning tokens and risking
-errors on simple aggregation questions like "how often was X turned on".
+## v3 — Response interpretation
 
-**Possible approach**: a second LLM pass inside the proxy that summarizes
-raw responses when they exceed a size threshold. "Here are 119 state changes,
-the user asked 'how often turned on' — return a one-line summary." Generic,
-handles any aggregation, only fires when needed. Adds latency and cost
-though, so it's a conscious tradeoff.
+**Status**: open, and now demonstrated rather than hypothetical.
 
-**Why not now**: the trimmed response (attributes stripped) was small enough
-for the model to handle correctly. Not worth the complexity until response
-size actually causes problems for the model in practice.
+Live test 2026-07-22, *"wie viel Energie hat das Leinwand-Relay in den letzten 5
+Tagen verbraucht?"* — the proxy returned correct daily statistics buckets, but
+the model answered **0,164 kWh** when the true figure is **~0 kWh**: every
+bucket's `sum` was identical (`0.0362333`), and HA's `sum` is a cumulative
+counter that must be differenced, not added.
 
-**Alternative**: local aggregation in Python (count on-transitions, sum
-energy values) without an LLM call — faster, free, but less generic and
-hardcodes specific use cases.
+Two model-level failures in that session, neither a proxy bug:
+
+- **Cumulative vs delta**: model adds `sum` values instead of differencing them.
+- **Stale clock**: asked for "last 4 days" on 2026-07-22, it built the window
+  `2026-07-12 → 2026-07-15` from static-context timestamps instead of calling
+  `GetDateTime`.
+
+**First attempt is prompt, not code** — both are addressed by rules R1/R2 in
+`memories/rules.md`. Fixing them in the proxy would mean re-hardcoding HA
+response semantics, exactly what v2 removed. Only if rules prove insufficient
+should a summarization pass be built.
+
+**Alternative if rules fail**: local aggregation in Python (difference the
+`sum` series) — faster and free, but hardcodes HA statistics semantics into a
+server-agnostic proxy. Weigh carefully.
 
 ## Dropped
 

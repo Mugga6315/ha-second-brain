@@ -3,13 +3,15 @@ from __future__ import annotations
 import voluptuous as vol
 from homeassistant.helpers import llm
 
-from .const import DOMAIN
+from .const import DOMAIN, LOGGER
 
 
 class BrainAPI(llm.API):
-    def __init__(self, hass, store) -> None:
+    def __init__(self, hass, store, proxy=None, mcp_read_only=True) -> None:
         super().__init__(hass=hass, id=DOMAIN, name="Second Brain")
         self._store = store
+        self._proxy = proxy
+        self._mcp_read_only = mcp_read_only
 
     async def async_get_api_instance(
         self, llm_context: llm.LLMContext
@@ -22,6 +24,17 @@ class BrainAPI(llm.API):
             UpdateMemoryTool(self._store),
             ForgetTool(self._store),
         ]
+        # --- MCP proxy seam (optional feature; see docs/MCP.md to remove) ---
+        # Guarded: the proxy is optional, so nothing it does may cost the user
+        # their brain tools. A missing module (partial deploy) or an unreachable
+        # MCP server degrades to "no query_ha", never to "no Second Brain".
+        try:
+            from .mcp_proxy import async_extra_tools
+
+            tools += await async_extra_tools(self._proxy, self._mcp_read_only)
+        except Exception:
+            LOGGER.exception("MCP proxy unavailable — continuing without query_ha")
+        # --- end MCP proxy seam ---
         return llm.APIInstance(
             api=self,
             api_prompt=prompt,
