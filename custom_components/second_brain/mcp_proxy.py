@@ -29,6 +29,8 @@ CONF_MCP_TOKEN = "mcp_token"
 CONF_MCP_READ_ONLY = "mcp_read_only"
 
 QUERY_HA_MAX_CHARS = 6000
+QUERY_HA_DOC_CHARS = 2000
+_EMPTY_PREFIX = "NO DATA: "
 _MCP_PROTOCOL_VERSION = "2025-03-26"
 
 
@@ -162,7 +164,19 @@ class MCPProxy:
             result = resp.get("result", {})
             content = result.get("content", [])
             texts = [c.get("text", "") for c in content if c.get("type") == "text"]
-            return "\n".join(texts) if texts else json.dumps(result)
+            if any(t.strip() for t in texts):
+                return "\n".join(texts)
+            # An empty body is where models loop: they retry variations of a call
+            # that cannot work. Name the real causes instead of guessing one.
+            return (
+                f"{_EMPTY_PREFIX}'{name}' returned nothing for "
+                f"{json.dumps(arguments)}. Likely causes: the entity is not "
+                "recorded (template/SQL sensors often are not, so they have "
+                "neither history nor statistics), or long-term statistics need "
+                'source="statistics" and an entity with a state_class. Change '
+                "the ENTITY, not the time range - or answer from its current "
+                "state and say history is unavailable."
+            )
         except aiohttp.ClientResponseError as e:
             return f"Error: MCP server returned HTTP {e.status}"
         except Exception as e:
@@ -200,7 +214,9 @@ def _render_tool(t: dict) -> str:
     required = schema.get("required", []) or []
     parts = list(required) + [f"[{p}]" for p in props if p not in required]
     desc = (t.get("description", "") or "").split(". ")[0][:80]
-    return f"{t.get('name')}({', '.join(parts)}) — {desc}"
+    # No "name(args)" signature form: models read that as a callable tool and try
+    # to invoke the name directly, which no client can resolve.
+    return f'- "{t.get("name")}" — {desc}. args: {", ".join(parts)}'
 
 
 class QueryHATool(llm.Tool):
@@ -216,9 +232,28 @@ class QueryHATool(llm.Tool):
         self._proxy = proxy
         allowed = [t for t in proxy.tools if not (read_only and _is_write(t.get("name", "")))]
         self._allowed = {t["name"] for t in allowed}
+        # Full descriptions are too big to inline for every tool, but they are
+        # what a failed call needs: they document sources, formats and examples
+        # the one-line summary drops.
+        self._docs = {t["name"]: (t.get("description") or "") for t in allowed}
+        # Empty calls already made this conversation turn, so a repeat can be
+        # answered with "stop" instead of the same unhelpful nothing.
+        self._empty: set[str] = set()
+        LOGGER.debug(
+            "query_ha: %d of %d tools exposed (read_only=%s)",
+            len(allowed), len(proxy.tools), read_only,
+        )
         self.description = (
-            "Call a Home Assistant MCP tool. Pass tool_name and arguments matching its params. "
-            "Available tools:\n" + "\n".join(_render_tool(t) for t in allowed)
+            "The ONLY way to read Home Assistant data: states, history, "
+            "statistics, entities, logs.\n"
+            "Call THIS tool, under the exact name it has in your tool list - it "
+            "may carry a namespace prefix, and that prefix is part of the name. "
+            "Do not invent a prefix from another server.\n"
+            "The names listed below are NOT tools and cannot be called: they are "
+            "the allowed values of this tool's tool_name parameter. Put the name "
+            "in tool_name and its parameters in arguments (a JSON object).\n"
+            "Valid tool_name values:\n"
+            + "\n".join(_render_tool(t) for t in allowed)
         )
 
     async def async_call(
@@ -240,6 +275,24 @@ class QueryHATool(llm.Tool):
                 )
             }
         result = await self._proxy.async_call_tool(name, args)
+        if result.startswith(_EMPTY_PREFIX):
+            key = f"{name}:{json.dumps(args, sort_keys=True, default=str)}"
+            if self._empty:
+                # Second empty call in one turn: more retries will not help.
+                return {
+                    "result": (
+                        f"{result}\n\nYou already ran {len(self._empty)} call(s) "
+                        "that returned nothing. STOP calling this tool for this "
+                        "question. Answer with the data you have and state "
+                        "plainly which part is unavailable."
+                    )
+                }
+            self._empty.add(key)
+            if self._docs.get(name):
+                result += (
+                    f"\n\nFull documentation for {name} - read it before retrying:\n"
+                    + self._docs[name][:QUERY_HA_DOC_CHARS]
+                )
         if len(result) > QUERY_HA_MAX_CHARS:
             result = result[:QUERY_HA_MAX_CHARS] + "\n…[truncated]"
         return {"result": result}

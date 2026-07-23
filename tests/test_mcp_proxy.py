@@ -290,3 +290,77 @@ async def test_query_ha_rejects_unparseable_arguments():
     )
     assert "error" in result
     assert len(proxy.calls) == 0
+
+
+async def test_empty_mcp_result_tells_model_what_to_do(hass):
+    from custom_components.second_brain.mcp_proxy import MCPProxy
+
+    proxy = MCPProxy(hass, "http://x/mcp", "")
+    proxy._initialized = True
+
+    async def fake_send(method, params=None):
+        return {"result": {}}
+
+    proxy._send = fake_send
+    out = await proxy.async_call_tool("ha_get_history", {"entity_ids": ["sensor.nope"]})
+    assert "returned nothing" in out
+    assert "sensor.nope" in out
+    assert "not recorded" in out
+
+
+async def test_non_empty_mcp_result_passes_through(hass):
+    from custom_components.second_brain.mcp_proxy import MCPProxy
+
+    proxy = MCPProxy(hass, "http://x/mcp", "")
+    proxy._initialized = True
+
+    async def fake_send(method, params=None):
+        return {"result": {"content": [{"type": "text", "text": "[]"}]}}
+
+    proxy._send = fake_send
+    assert await proxy.async_call_tool("get_statistics", {}) == "[]"
+
+
+async def test_empty_result_hands_back_full_tool_docs():
+    tools = [{
+        "name": "ha_get_history",
+        "description": "Retrieve historical data. Sources: history (default) or statistics (source='statistics', needs state_class).",
+        "inputSchema": {"properties": {"entity_ids": {}, "source": {}}, "required": ["entity_ids"]},
+    }]
+
+    class EmptyProxy(FakeProxy):
+        async def async_call_tool(self, name, arguments):
+            self.calls.append((name, arguments))
+            return f"NO DATA: '{name}' returned nothing for {{}}."
+
+    tool = QueryHATool(EmptyProxy(tools), read_only=True)
+    result = await tool.async_call(
+        None,
+        llm.ToolInput(id="1", tool_name="query_ha", tool_args={"tool_name": "ha_get_history", "arguments": {"entity_ids": ["sensor.nope"]}}),
+        None,
+    )
+    assert "source='statistics'" in result["result"]
+    assert "Full documentation for ha_get_history" in result["result"]
+
+
+async def test_second_empty_call_tells_model_to_stop():
+    tools = [{"name": "ha_get_history", "description": "docs", "inputSchema": {"properties": {"entity_ids": {}}, "required": ["entity_ids"]}}]
+
+    class EmptyProxy(FakeProxy):
+        async def async_call_tool(self, name, arguments):
+            self.calls.append((name, arguments))
+            return f"NO DATA: '{name}' returned nothing for {{}}."
+
+    tool = QueryHATool(EmptyProxy(tools), read_only=True)
+
+    async def call(entity):
+        return await tool.async_call(
+            None,
+            llm.ToolInput(id="1", tool_name="query_ha", tool_args={"tool_name": "ha_get_history", "arguments": {"entity_ids": [entity]}}),
+            None,
+        )
+
+    first = await call("sensor.a")
+    assert "STOP calling this tool" not in first["result"]
+    second = await call("sensor.b")
+    assert "STOP calling this tool" in second["result"]

@@ -48,7 +48,8 @@ class SearchBrainTool(llm.Tool):
     description = (
         "Search stored notes and memories by keywords. Returns note paths with "
         "snippets. Use before answering questions about the household or "
-        "previously remembered facts."
+        "previously remembered facts. NOT for live or historical device data - "
+        "sensor readings, energy, statistics and history come from query_ha."
     )
     parameters = vol.Schema({vol.Required("query"): str})
 
@@ -60,7 +61,13 @@ class SearchBrainTool(llm.Tool):
     ) -> dict:
         results = await self._store.async_search(tool_input.tool_args["query"])
         if not results:
-            return {"result": "No results found."}
+            return {
+                "result": (
+                    "No results found. Nothing about this is stored in the brain. "
+                    "Do NOT search again with different wording - answer from your "
+                    "other tools, or tell the user the information is not stored."
+                )
+            }
         lines = ["Search results:"]
         for r in results:
             lines.append(f"- {r['path']} (score: {r['score']})\n  {r['snippet']}")
