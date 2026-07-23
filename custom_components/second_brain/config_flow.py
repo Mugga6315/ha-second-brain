@@ -209,13 +209,16 @@ class SecondBrainOptionsFlow(OptionsFlow):
                     CONF_NOTE_CHARS,
                     default=opts.get(CONF_NOTE_CHARS, NOTE_CHARS),
                 ): vol.All(vol.Coerce(int), vol.Range(min=1000, max=50000)),
+                # suggested_value, NOT default: clearing a text field makes the
+                # frontend omit the key, and a `default` would then restore the
+                # old value - so the field could never be emptied.
                 vol.Optional(
                     CONF_LLM_BASE_URL,
-                    default=opts.get(CONF_LLM_BASE_URL, ""),
+                    description={"suggested_value": opts.get(CONF_LLM_BASE_URL, "")},
                 ): str,
                 vol.Optional(
                     CONF_LLM_API_KEY,
-                    default=opts.get(CONF_LLM_API_KEY, ""),
+                    description={"suggested_value": opts.get(CONF_LLM_API_KEY, "")},
                 ): str,
                 # --- MCP proxy seam (see docs/MCP.md to remove) ---
                 **_mcp_options_schema(opts),

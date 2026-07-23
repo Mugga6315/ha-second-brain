@@ -12,7 +12,7 @@ async def test_api_instance_has_prompt_and_tools(hass, store):
     instance = await api.async_get_api_instance(llm_context=None)
     assert "Custom Core" in instance.api_prompt
     assert "search_brain" in instance.api_prompt
-    assert [t.name for t in instance.tools] == [
+    assert [t.name for t in instance.tools][:5] == [
         "search_brain",
         "read_note",
         "remember",
@@ -92,3 +92,16 @@ async def test_remember_tool_no_topic(hass, store):
     assert isinstance(result, dict)
     assert "memories/inbox.md" in result["result"]
     assert (store._root / "memories" / "inbox.md").exists()
+
+
+async def test_search_brain_empty_lists_notes(hass, store):
+    await store.async_setup()
+    await store.async_remember("boiler service due in October", topic="boiler")
+    instance = await BrainAPI(hass, store).async_get_api_instance(llm_context=None)
+    result = await _tool(instance, "search_brain").async_call(
+        hass,
+        llm.ToolInput(id="1", tool_name="search_brain", tool_args={"query": "nonexistent"}),
+        None,
+    )
+    assert "No matches" in result["result"]
+    assert "memories/boiler.md" in result["result"]

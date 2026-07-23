@@ -5,6 +5,7 @@ file plus that module removes the feature's test surface entirely — see docs/M
 """
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -221,7 +222,7 @@ async def test_broken_mcp_proxy_does_not_kill_brain_tools(hass, store):
     ):
         instance = await api.async_get_api_instance(llm_context=None)
 
-    assert [t.name for t in instance.tools] == [
+    assert [t.name for t in instance.tools][:5] == [
         "search_brain",
         "read_note",
         "remember",
@@ -364,3 +365,201 @@ async def test_second_empty_call_tells_model_to_stop():
     assert "STOP calling this tool" not in first["result"]
     second = await call("sensor.b")
     assert "STOP calling this tool" in second["result"]
+
+
+# --- v3: statistics delta -----------------------------------------------------
+
+async def test_statistics_delta_appended():
+    """Statistics response with sum buckets gets computed delta."""
+    class StatsProxy:
+        available = True
+        tools = [{"name": "get_statistics", "inputSchema": {"properties": {"entity_ids": {}}, "required": ["entity_ids"]}}]
+        async def async_initialize(self): pass
+        async def async_call_tool(self, name, arguments):
+            return json.dumps([
+                {"entity_id": "sensor.x", "start": "2026-07-18", "end": "2026-07-19", "sum": 10.0, "state": 5.0},
+                {"entity_id": "sensor.x", "start": "2026-07-19", "end": "2026-07-20", "sum": 15.0, "state": 7.0},
+            ])
+
+    tool = QueryHATool(StatsProxy(), read_only=True)
+    result = await tool.async_call(
+        None,
+        llm.ToolInput(id="1", tool_name="query_ha", tool_args={"tool_name": "get_statistics", "arguments": {"entity_ids": ["sensor.x"]}}),
+        None,
+    )
+    assert "computed delta" in result["result"]
+    assert "5.0" in result["result"]  # 15.0 - 10.0
+
+
+async def test_statistics_delta_single_bucket_is_noop():
+    """Single bucket has no delta to compute."""
+    class SingleProxy:
+        available = True
+        tools = [{"name": "get_statistics", "inputSchema": {"properties": {"entity_ids": {}}, "required": ["entity_ids"]}}]
+        async def async_initialize(self): pass
+        async def async_call_tool(self, name, arguments):
+            return json.dumps([
+                {"entity_id": "sensor.x", "start": "2026-07-18", "end": "2026-07-19", "sum": 10.0},
+            ])
+
+    tool = QueryHATool(SingleProxy(), read_only=True)
+    result = await tool.async_call(
+        None,
+        llm.ToolInput(id="1", tool_name="query_ha", tool_args={"tool_name": "get_statistics", "arguments": {"entity_ids": ["sensor.x"]}}),
+        None,
+    )
+    assert "computed delta" not in result["result"]
+
+
+async def test_statistics_delta_non_statistics_passthrough():
+    """Non-statistics JSON passes through unchanged."""
+    class PlainProxy:
+        available = True
+        tools = [{"name": "get_history", "inputSchema": {"properties": {"entity_ids": {}}, "required": ["entity_ids"]}}]
+        async def async_initialize(self): pass
+        async def async_call_tool(self, name, arguments):
+            return json.dumps([{"state": "on", "entity_id": "light.kitchen"}])
+
+    tool = QueryHATool(PlainProxy(), read_only=True)
+    result = await tool.async_call(
+        None,
+        llm.ToolInput(id="1", tool_name="query_ha", tool_args={"tool_name": "get_history", "arguments": {"entity_ids": ["light.kitchen"]}}),
+        None,
+    )
+    assert "computed delta" not in result["result"]
+
+
+async def test_statistics_delta_multi_entity_is_per_entity():
+    """Multiple entities in one response — one delta each, never across them."""
+    class MultiProxy:
+        available = True
+        tools = [{"name": "get_statistics", "inputSchema": {"properties": {"entity_ids": {}}, "required": ["entity_ids"]}}]
+        async def async_initialize(self): pass
+        async def async_call_tool(self, name, arguments):
+            return json.dumps([
+                {"entity_id": "sensor.a", "sum": 10.0, "start": "2026-07-18"},
+                {"entity_id": "sensor.a", "sum": 12.0, "start": "2026-07-19"},
+                {"entity_id": "sensor.b", "sum": 500.0, "start": "2026-07-18"},
+                {"entity_id": "sensor.b", "sum": 900.0, "start": "2026-07-19"},
+            ])
+
+    tool = QueryHATool(MultiProxy(), read_only=True)
+    result = await tool.async_call(
+        None,
+        llm.ToolInput(id="1", tool_name="query_ha", tool_args={"tool_name": "get_statistics", "arguments": {"entity_ids": ["sensor.a", "sensor.b"]}}),
+        None,
+    )
+    assert "sensor.a (last.sum - first.sum): 2.0" in result["result"]
+    assert "sensor.b (last.sum - first.sum): 400.0" in result["result"]
+    assert "890" not in result["result"]  # never last-of-b minus first-of-a
+
+
+async def test_statistics_delta_survives_truncation():
+    """Delta appended after truncation — must appear in capped output."""
+    class HugeProxy:
+        available = True
+        tools = [{"name": "get_statistics", "inputSchema": {"properties": {"entity_ids": {}}, "required": ["entity_ids"]}}]
+        async def async_initialize(self): pass
+        async def async_call_tool(self, name, arguments):
+            buckets = [
+                {"entity_id": "sensor.x", "sum": float(i), "start": f"2026-06-{1+i:02d}"}
+                for i in range(100)
+            ]
+            return json.dumps(buckets)
+
+    tool = QueryHATool(HugeProxy(), read_only=True)
+    result = await tool.async_call(
+        None,
+        llm.ToolInput(id="1", tool_name="query_ha", tool_args={"tool_name": "get_statistics", "arguments": {"entity_ids": ["sensor.x"]}}),
+        None,
+    )
+    assert "computed delta" in result["result"]
+    # i=98 → sum=98.0 (2026-06-99) sorts last; i=99 → 2026-06-100 sorts before it
+    assert "98.0" in result["result"]
+
+
+def test_delta_flat_list_without_entity_id():
+    """ganhammar shape: flat buckets, no entity_id (verified live 2026-07-23)."""
+    from custom_components.second_brain.mcp_proxy import _compute_statistics_delta
+
+    payload = json.dumps([
+        {"start": 1784325600.0, "end": 1784412000.0, "sum": 0.0362333333333337, "state": 0.1019},
+        {"start": 1784757600.0, "end": 1784844000.0, "sum": 0.0370999999999997, "state": 0.1027},
+    ])
+    assert "computed delta (last.sum - first.sum): 0.000866" in _compute_statistics_delta(payload)
+
+
+def test_delta_ha_mcp_entities_shape():
+    """ha-mcp shape: {"data": {"entities": [{entity_id, unit, statistics}]}}."""
+    from custom_components.second_brain.mcp_proxy import _compute_statistics_delta
+
+    payload = json.dumps({
+        "data": {
+            "success": True,
+            "source": "statistics",
+            "entities": [{
+                "entity_id": "sensor.solar_total",
+                "period": "day",
+                "unit_of_measurement": "kWh",
+                "statistics": [
+                    {"start": "2026-07-19T00:00:00", "sum": 100.0},
+                    {"start": "2026-07-22T00:00:00", "sum": 107.5},
+                ],
+            }],
+        },
+        "metadata": {"timezone": "Europe/Berlin"},
+    })
+    out = _compute_statistics_delta(payload)
+    assert "for sensor.solar_total" in out
+    assert "7.5 kWh" in out
+
+
+def test_delta_per_entity_never_crosses_entities():
+    from custom_components.second_brain.mcp_proxy import _compute_statistics_delta
+
+    payload = json.dumps([
+        {"entity_id": "sensor.a", "start": 1, "sum": 10.0},
+        {"entity_id": "sensor.a", "start": 2, "sum": 12.0},
+        {"entity_id": "sensor.b", "start": 1, "sum": 500.0},
+        {"entity_id": "sensor.b", "start": 2, "sum": 900.0},
+    ])
+    out = _compute_statistics_delta(payload)
+    assert "sensor.a (last.sum - first.sum): 2.0" in out
+    assert "sensor.b (last.sum - first.sum): 400.0" in out
+    assert "890" not in out
+
+
+async def test_delta_survives_response_truncation():
+    tools = [{"name": "get_statistics", "description": "d", "inputSchema": {"properties": {"entity_id": {}}, "required": ["entity_id"]}}]
+    big = [{"start": i, "sum": float(i)} for i in range(2000)]
+
+    class BigProxy(FakeProxy):
+        async def async_call_tool(self, name, arguments):
+            return json.dumps(big)
+
+    tool = QueryHATool(BigProxy(tools), read_only=True)
+    result = await tool.async_call(
+        None,
+        llm.ToolInput(id="1", tool_name="query_ha", tool_args={"tool_name": "get_statistics", "arguments": {"entity_id": "sensor.x"}}),
+        None,
+    )
+    assert "[truncated]" in result["result"]
+    assert "computed delta (last.sum - first.sum): 1999.0" in result["result"]
+
+
+def test_options_schema_allows_clearing_the_url():
+    """Regression: an mcp_url could not be removed once saved.
+
+    Clearing a text field makes the HA frontend omit the key. With
+    `vol.Optional(..., default=<old value>)` voluptuous then put the old URL
+    straight back, so submitting an empty field silently kept the proxy alive.
+    """
+    import voluptuous as vol
+    from custom_components.second_brain.mcp_proxy import CONF_MCP_URL, options_schema
+
+    saved = {CONF_MCP_URL: "http://localhost:8123/api/mcp", "mcp_read_only": True}
+    schema = vol.Schema(options_schema(saved))
+
+    assert schema({}).get(CONF_MCP_URL, "") == ""
+    assert schema({CONF_MCP_URL: ""}).get(CONF_MCP_URL, "") == ""
+    assert schema({CONF_MCP_URL: "http://other/mcp"})[CONF_MCP_URL] == "http://other/mcp"

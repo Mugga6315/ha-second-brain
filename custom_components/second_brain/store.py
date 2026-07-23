@@ -44,9 +44,19 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
 # example paths out of the prompt text.
 _MACHINERY_FILES = {"INDEX.md", "CONSOLIDATE.md"}
 
+# Indexed and readable, but not searchable: a changelog contains every word that
+# ever passed through the store, so it matches every query and buries real notes.
+_LOG_FILE = "log.md"
+
 _LINE_CRUFT = re.compile(
     r"^\s*(?:[-*]\s+)?(?:\d{4}-\d{2}-\d{2}[T ][\d:.]+(?:[+-]\d{2}:\d{2}|Z)?\s+)?"
 )
+
+# The store is an Obsidian vault, so notes are related by hand with [[wikilinks]]
+# ([[target]] or [[target|alias]]). Search follows them one hop so a note the
+# query missed can still surface. Capped so a hub note can't flood the results.
+_WIKILINK = re.compile(r"\[\[([^\]|#\n]+)")
+_MAX_LINKED = 5
 
 
 def _clean_lines(text: str) -> list[str]:
@@ -55,10 +65,12 @@ def _clean_lines(text: str) -> list[str]:
     return [line for line in lines if line]
 
 
-def _make_frontmatter(title: str, tags: list[str]) -> str:
+def _make_frontmatter(title: str, tags: list[str], load_when: str = "") -> str:
     lines = ["---"]
     lines.append(f"title: {title}")
     lines.append(f"tags: {', '.join(tags)}")
+    if load_when:
+        lines.append(f"load_when: {load_when}")
     lines.append(f"created: {datetime.now(timezone.utc).isoformat()}")
     lines.append("---\n")
     return "\n".join(lines)
@@ -139,12 +151,14 @@ class Store:
             )
 
     def _search_sync(self, query: str) -> list[dict]:
-        """Naive scored scan of all .md files in the store."""
+        """Scored scan of all .md files, then one hop along [[wikilinks]]."""
         # ponytail: O(files×lines) scan; inverted index only if store outgrows ~1k files
         words = [w for w in query.lower().split() if w]
         results = []
+        by_key: dict[str, str] = {}  # stem/title (lowercased) -> rel path, for [[links]]
+        bodies: dict[str, str] = {}  # rel path -> body, for snippets + link extraction
         for fpath in self._root.rglob("*.md"):
-            if fpath.name in _MACHINERY_FILES:
+            if fpath.name in _MACHINERY_FILES or fpath.name == _LOG_FILE:
                 continue
             if fpath.relative_to(self._root).parts[0] == ".git":
                 continue
@@ -153,7 +167,12 @@ class Store:
             except Exception:
                 continue
             front, body = _parse_frontmatter(text)
+            rel = str(fpath.relative_to(self._root))
             stem = fpath.stem.lower()
+            by_key[stem] = rel
+            if title := front.get("title", "").strip().lower():
+                by_key.setdefault(title, rel)
+            bodies[rel] = body
             tags = [t.strip().lower() for t in front.get("tags", "").split(",") if t.strip()]
             headings = [h.lower() for h in re.findall(r"^#{1,6}\s+(.+)", body, re.MULTILINE)]
             body_lower = body.lower()
@@ -168,14 +187,34 @@ class Store:
                 if w in body_lower:
                     score += SEARCH_SCORE_BODY
             if score > 0:
-                rel = str(fpath.relative_to(self._root))
-                snippet = _snippet(body, words[0], 200)
-                results.append({"path": rel, "score": score, "snippet": snippet})
+                results.append(
+                    {"path": rel, "score": score, "snippet": _snippet(body, words[0], 200)}
+                )
         results.sort(key=lambda r: -r["score"])
-        return results[:SEARCH_RESULTS]
+        results = results[:SEARCH_RESULTS]
+        return results + _linked_notes(results, by_key, bodies)
 
     async def async_search(self, query: str) -> list[dict]:
         return await self._hass.async_add_executor_job(self._search_sync, query)
+
+    def _list_notes_sync(self, limit: int = 50) -> list[str]:
+        """Return relative paths of all user-facing .md files, capped at limit."""
+        notes = []
+        total = 0
+        for fpath in sorted(self._root.rglob("*.md")):
+            if fpath.name in _MACHINERY_FILES:
+                continue
+            if fpath.relative_to(self._root).parts[0] == ".git":
+                continue
+            total += 1
+            if len(notes) < limit:
+                notes.append(str(fpath.relative_to(self._root)))
+        if total > limit:
+            notes.append(f"…and {total - limit} more")
+        return notes
+
+    async def async_list_notes(self) -> list[str]:
+        return await self._hass.async_add_executor_job(self._list_notes_sync)
 
     async def async_read_note(self, path: str) -> str:
         """Read a note with path traversal protection."""
@@ -263,6 +302,30 @@ class Store:
         return await self._hass.async_add_executor_job(
             self._clear_memory_lines_sync, path, containing
         )
+
+    def _append_log_sync(self, entry: str) -> None:
+        """Append one dated entry to log.md (consolidator use). No commit."""
+        path = self._root / "log.md"
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+        if not path.exists():
+            # The index routes on load_when, so the log has to say what it is for.
+            path.write_text(
+                _make_frontmatter(
+                    "log",
+                    ["log"],
+                    load_when=(
+                        "the user asks what changed recently, what was updated "
+                        "or cleaned up, or what the consolidator did"
+                    ),
+                ),
+                encoding="utf-8",
+            )
+        with path.open("a", encoding="utf-8") as f:
+            f.write(f"\n## {stamp} UTC\n{entry.rstrip()}\n")
+
+    async def async_append_log(self, entry: str) -> None:
+        """Record what changed, so a session can start from the delta."""
+        await self._hass.async_add_executor_job(self._append_log_sync, entry)
 
     async def async_commit(
         self, message: str, name: str | None = None, email: str | None = None
@@ -391,7 +454,12 @@ class Store:
             mtime = datetime.fromtimestamp(
                 fpath.stat().st_mtime, tz=timezone.utc
             ).strftime("%Y-%m-%d")
-            lines.append(f"- **{title}** `{rel}` tags: {tags} modified: {mtime}\n")
+            entry = f"- **{title}** `{rel}` tags: {tags} modified: {mtime}"
+            # An index is a routing table, not an inventory: the consolidator
+            # writes `load_when:` so the model can tell which page answers what.
+            if load_when := front.get("load_when"):
+                entry += f"\n  load when: {load_when}"
+            lines.append(entry + "\n")
         (self._root / "INDEX.md").write_text("".join(lines), encoding="utf-8")
 
     def _commit_sync(self, message: str, name: str | None = None, email: str | None = None) -> None:
@@ -476,6 +544,33 @@ def _snippet(text: str, query: str, width: int = 200) -> str:
     return snip
 
 
+def _linked_notes(
+    results: list[dict], by_key: dict[str, str], bodies: dict[str, str]
+) -> list[dict]:
+    """Notes reached by following [[wikilinks]] out of the matched notes.
+
+    One hop only, deduped against the matches, capped at _MAX_LINKED. Each is
+    marked with the note it was linked from and gets a short preview, so the
+    model can tell a curated link from a keyword hit and read_note it if useful.
+    """
+    seen = {r["path"] for r in results}
+    linked: list[dict] = []
+    for r in results:
+        for target in _WIKILINK.findall(bodies.get(r["path"], "")):
+            key = target.strip().lower()
+            path = by_key.get(key) or by_key.get(_slugify(target))
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            preview = " ".join(bodies.get(path, "").split())[:160]
+            linked.append(
+                {"path": path, "score": 0, "linked_from": r["path"], "snippet": preview}
+            )
+            if len(linked) >= _MAX_LINKED:
+                return linked
+    return linked
+
+
 def _bullet_prefix(slug: str) -> str:
     """Timestamp prefix for memory bullets; rules get none (git has dates)."""
     if slug == "rules":
@@ -504,8 +599,29 @@ You receive all memory files (memories/*.md) and all existing wiki pages
 1. Merge new memory bullets into the matching wiki/ page (create if missing).
 2. Drop exact duplicates.
 3. Mark superseded facts (append "(superseded YYYY-MM-DD)" to the old line).
-4. Write proper frontmatter (title, tags) on new wiki pages.
-5. Never touch CORE.md, INDEX.md, or memories/rules.md.
+4. Write frontmatter on every wiki page you write: `title`, `tags`, and
+   `load_when` - one short line saying when this page is worth reading, e.g.
+   `load_when: questions about the solar system, inverter or feed-in`. The index
+   shows it, so it is how the assistant decides which page answers a question.
+5. Link related pages with `[[name]]`, where name is the target page's filename
+   without the `.md` (so `[[solar]]` points at `wiki/solar.md`). Add a link where
+   one page genuinely refers to another - a battery page mentioning the inverter,
+   an appliance mentioning its maintenance page. Only link pages that exist (in
+   the wiki you were given or one you are writing this run); do not invent
+   targets. Search follows these links, so a query that matches one page also
+   surfaces the pages it points at.
+6. Never touch CORE.md, INDEX.md, log.md, or memories/rules.md.
+
+## Lint
+While merging, also check the wiki you were given and fix what is wrong:
+- Two pages stating the same fact differently: keep the newer, mark the older
+  superseded.
+- A fact contradicted by a newer memory: correct it in place.
+- Duplicated bullets inside one page: remove.
+- A page that is now empty or has no real content: leave the file alone and
+  report it instead of deleting.
+Report every fix you made in `lint_findings`, one short sentence each. It is
+written to log.md so a human can review what you changed unattended.
 
 ## Output format
 Return JSON only, no markdown fences:
@@ -515,8 +631,12 @@ Return JSON only, no markdown fences:
   ],
   "memories_to_clear": [
     {"path": "memories/inbox.md", "containing": "text snippet to identify the bullet"}
+  ],
+  "lint_findings": [
+    "wiki/solar.md: marked the 2025 inverter capacity superseded by the June entry"
   ]
 }
 
-If nothing needs consolidating, return: {"wiki_updates": [], "memories_to_clear": []}
+If nothing needs consolidating, return:
+{"wiki_updates": [], "memories_to_clear": [], "lint_findings": []}
 """

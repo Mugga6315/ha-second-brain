@@ -32,6 +32,8 @@ directory, which works fine for HA-only access.
 <store_location>/second_brain/
 ├── CORE.md       # pinned context, injected every turn (you edit this)
 ├── INDEX.md      # auto-generated index (do not edit)
+├── log.md        # what the consolidator changed, per run (do not edit)
+├── CONSOLIDATE.md # the consolidator's prompt (you edit this)
 ├── memories/     # assistant-written notes
 memories/rules.md  # behavior rules - injected into EVERY turn, always active
 ├── wiki/         # curated notes (you edit via Obsidian/Samba/git)
@@ -61,11 +63,21 @@ Install [ha-mcp](https://github.com/homeassistant-ai/ha-mcp) via HACS for deeper
 
 | Tool | Description |
 |------|-------------|
-| `search_brain(query)` | Search all notes by relevance |
+| `search_brain(query)` | Search all notes by relevance; also follows `[[wikilinks]]` one hop from the matches |
 | `read_note(path)` | Read a note's full content |
 | `remember(text, topic?)` | Add a NEW fact (append-only) |
 | `update_memory(topic, text)` | Replace a topic's memories (corrections) |
 | `forget(topic, containing?)` | Delete a topic's memories, or only matching entries |
+| `get_statistics(entity_id, start, end?, breakdown?)` | Measured values over time: energy used, average temperature, highest day |
+| `get_history(entity_id, start, end?)` | When an entity changed state, within the recorder's retention |
+| `get_calendar_events(start, end?, calendar?)` | Appointments across **all** calendars for any period, merged and labelled |
+
+These three read Home Assistant's own data. `get_calendar_events` exists because
+the built-in calendar tool queries one calendar at a time and only supports
+"today" or "week" - see [docs/HA_DATA.md](docs/HA_DATA.md). Calendars must be
+**exposed to Assist** (Settings → Voice assistants → Expose); HA does not expose
+the `calendar` domain by default. They are optional and self-contained - see [docs/HA_DATA.md](docs/HA_DATA.md), which also
+covers how to remove them.
 
 ## Options
 
@@ -87,15 +99,20 @@ integration options.
 
 **What it does**: reads all memories, reads all wiki pages, asks the LLM to
 merge new memories into the matching wiki page, then clears the processed
-memory bullets. Every consolidation run is a git commit authored as
-"Second Brain Consolidator" — visible in `git log` and revertable.
+memory bullets. It also lints the wiki as it goes — marking superseded facts,
+removing duplicates, correcting entries a newer memory contradicts — and writes
+`load_when` frontmatter so `INDEX.md` says which page answers what. Every run
+appends an entry to `log.md` (what was updated, what was cleared, what lint
+changed) and is a git commit authored as "Second Brain Consolidator" — visible
+in `git log` and revertable.
 
 **Manual trigger**: call the `second_brain.consolidate` service from HA
 developer tools or an automation.
 
 **Safety rails**: refuses to clear more than 100 memory lines per run;
 aborts on LLM JSON parse failure (no partial writes); never touches
-`CORE.md`, `INDEX.md`, or `memories/rules.md`.
+`CORE.md`, `INDEX.md`, `log.md`, or `memories/rules.md`. Because lint edits wiki
+pages unattended, every change it makes is named in `log.md`.
 
 The consolidation prompt is user-editable in `CONSOLIDATE.md` in the store.
 

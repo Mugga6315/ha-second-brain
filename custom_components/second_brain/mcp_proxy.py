@@ -208,6 +208,67 @@ def _is_write(name: str) -> bool:
     return any(v in name for v in _WRITE_VERBS)
 
 
+def _statistics_series(data: Any) -> list[tuple[str, str | None, list]]:
+    """Extract (entity_id, unit, buckets) series from a statistics response.
+
+    Two shapes seen in the wild, hence no assumption of either:
+    - ganhammar: a flat list of buckets, no entity_id (single-entity call).
+    - ha-mcp: {"data": {"entities": [{entity_id, unit_of_measurement,
+      statistics: [...]}]}} — a list check alone silently skips it.
+    Flat lists are grouped by entity_id when present, so a multi-entity response
+    can never subtract one entity's first bucket from another's last.
+    """
+    if isinstance(data, list):
+        groups: dict[str, list] = {}
+        for b in data:
+            if isinstance(b, dict):
+                groups.setdefault(str(b.get("entity_id", "")), []).append(b)
+        return [(eid, None, buckets) for eid, buckets in groups.items()]
+    if isinstance(data, dict):
+        inner = data.get("data") if isinstance(data.get("data"), dict) else data
+        entities = inner.get("entities")
+        if isinstance(entities, list):
+            return [
+                (
+                    str(e.get("entity_id", "")),
+                    e.get("unit_of_measurement"),
+                    e["statistics"],
+                )
+                for e in entities
+                if isinstance(e, dict) and isinstance(e.get("statistics"), list)
+            ]
+    return []
+
+
+def _compute_statistics_delta(result: str) -> str:
+    """Delta line(s) for statistics buckets, or '' when the shape doesn't match.
+
+    HA's `sum` is a cumulative counter: consumption over a window is
+    last - first, never the sum of the buckets.
+    """
+    try:
+        data = json.loads(result)
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    lines = []
+    for entity_id, unit, series in _statistics_series(data):
+        buckets = [
+            b for b in series
+            if isinstance(b, dict) and isinstance(b.get("sum"), (int, float))
+        ]
+        if len(buckets) < 2:
+            continue
+        try:
+            buckets.sort(key=lambda b: b["start"])
+        except (KeyError, TypeError):
+            pass  # unsortable or absent start: trust the server's order
+        delta = buckets[-1]["sum"] - buckets[0]["sum"]
+        label = f" for {entity_id}" if entity_id else ""
+        suffix = f" {unit}" if unit else ""
+        lines.append(f"computed delta{label} (last.sum - first.sum): {delta}{suffix}")
+    return "\n" + "\n".join(lines) if lines else ""
+
+
 def _render_tool(t: dict) -> str:
     schema = t.get("inputSchema", {}) or {}
     props = schema.get("properties", {}) or {}
@@ -293,8 +354,11 @@ class QueryHATool(llm.Tool):
                     f"\n\nFull documentation for {name} - read it before retrying:\n"
                     + self._docs[name][:QUERY_HA_DOC_CHARS]
                 )
+            return {"result": result}
+        delta_line = _compute_statistics_delta(result)
         if len(result) > QUERY_HA_MAX_CHARS:
             result = result[:QUERY_HA_MAX_CHARS] + "\n…[truncated]"
+        result += delta_line
         return {"result": result}
 
 
@@ -334,10 +398,20 @@ async def async_extra_tools(proxy, read_only: bool = True) -> list[llm.Tool]:
 
 
 def options_schema(opts: dict) -> dict[Any, Any]:
-    """Voluptuous fragment merged into the options form."""
+    """Voluptuous fragment merged into the options form.
+
+    suggested_value, NOT default: clearing a text field makes the frontend omit
+    the key, and a `default` would then put the old value straight back - which
+    is why an mcp_url could not be removed once set.
+    """
     return {
-        vol.Optional(CONF_MCP_URL, default=opts.get(CONF_MCP_URL, "")): str,
-        vol.Optional(CONF_MCP_TOKEN, default=opts.get(CONF_MCP_TOKEN, "")): str,
+        vol.Optional(
+            CONF_MCP_URL, description={"suggested_value": opts.get(CONF_MCP_URL, "")}
+        ): str,
+        vol.Optional(
+            CONF_MCP_TOKEN,
+            description={"suggested_value": opts.get(CONF_MCP_TOKEN, "")},
+        ): str,
         vol.Required(
             CONF_MCP_READ_ONLY, default=opts.get(CONF_MCP_READ_ONLY, True)
         ): bool,

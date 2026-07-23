@@ -147,3 +147,39 @@ async def test_consolidate_nothing_to_do(consolidator, store):
         result = await consolidator.async_run()
 
     assert "Nothing to consolidate" in result
+
+
+async def test_run_logs_what_it_changed_including_lint(hass, store):
+    await store.async_setup()
+    await store.async_remember("solar inverter is a Fronius", topic="solar")
+    plan = {
+        "wiki_updates": [
+            {"path": "wiki/solar.md", "content": "---\ntitle: solar\n---\n- Fronius\n"}
+        ],
+        "memories_to_clear": [{"path": "memories/solar.md", "containing": "Fronius"}],
+        "lint_findings": ["wiki/solar.md: marked the 2024 inverter line superseded"],
+    }
+    c = Consolidator(hass, store, base_url="http://x/v1", api_key="", model="m")
+    with patch.object(c, "_call_llm", AsyncMock(return_value=json.dumps(plan))):
+        await c.async_run()
+
+    log = (store._root / "log.md").read_text()
+    assert "wiki/solar.md" in log
+    assert "Cleared from memories:" in log
+    assert "marked the 2024 inverter line superseded" in log
+
+
+async def test_lint_only_run_still_logs(hass, store):
+    """A run that only reports lint findings is not 'nothing to do'."""
+    await store.async_setup()
+    await store.async_remember("something", topic="misc")
+    plan = {
+        "wiki_updates": [],
+        "memories_to_clear": [],
+        "lint_findings": ["wiki/a.md: removed a duplicated bullet"],
+    }
+    c = Consolidator(hass, store, base_url="http://x/v1", api_key="", model="m")
+    with patch.object(c, "_call_llm", AsyncMock(return_value=json.dumps(plan))):
+        result = await c.async_run()
+    assert "Nothing to consolidate" not in result
+    assert "removed a duplicated bullet" in (store._root / "log.md").read_text()

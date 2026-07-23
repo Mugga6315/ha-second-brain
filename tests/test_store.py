@@ -59,6 +59,47 @@ async def test_search_multi_word_query(store):
     assert any("boiler" in r["path"] for r in results)
 
 
+async def test_search_follows_wikilinks_one_hop(store):
+    """The store is an Obsidian vault: a note linked with [[..]] from a match
+    surfaces even when the query didn't match it (a curated one-hop bridge)."""
+    await store.async_setup()
+    (store._root / "wiki").mkdir(exist_ok=True)
+    (store._root / "wiki" / "solar.md").write_text(
+        "---\ntitle: solar\ntags: solar\n---\nOverview. See [[inverter]] for details.\n"
+    )
+    (store._root / "wiki" / "inverter.md").write_text(
+        "---\ntitle: inverter\ntags: inverter\n---\nFronius converts DC to AC, 8 kW.\n"
+    )
+    results = await store.async_search("solar")  # "solar" is absent from inverter.md
+    assert any(r["path"].endswith("solar.md") and not r.get("linked_from") for r in results)
+    linked = [r for r in results if r.get("linked_from")]
+    assert any(r["path"].endswith("inverter.md") for r in linked)
+    assert next(r for r in linked if r["path"].endswith("inverter.md"))[
+        "linked_from"
+    ].endswith("solar.md")
+
+
+async def test_consolidate_prompt_instructs_wikilinks(store):
+    """The consolidator must be told to link related pages, so search (which
+    follows [[wikilinks]]) has a self-building graph, not only hand-authored links."""
+    await store.async_setup()
+    prompt = (store._root / "CONSOLIDATE.md").read_text()
+    assert "[[name]]" in prompt
+    assert "Link related pages" in prompt
+
+
+async def test_search_ignores_dangling_wikilinks(store):
+    """A [[link]] to a note that doesn't exist is skipped, not an error."""
+    await store.async_setup()
+    (store._root / "wiki").mkdir(exist_ok=True)
+    (store._root / "wiki" / "solar.md").write_text(
+        "---\ntitle: solar\ntags: solar\n---\nSee [[nonexistent-note]].\n"
+    )
+    results = await store.async_search("solar")
+    assert any(r["path"].endswith("solar.md") for r in results)
+    assert not any(r.get("linked_from") for r in results)
+
+
 async def test_update_memory_replaces(store):
     await store.async_setup()
     await store.async_remember("old wifi password is hunter2", topic="wifi")
@@ -240,3 +281,49 @@ async def test_search_ignores_consolidate_prompt(store):
     assert not any(r["path"] == "CONSOLIDATE.md" for r in results)
     index = (store._root / "INDEX.md").read_text()
     assert "CONSOLIDATE.md" not in index
+
+
+async def test_log_is_indexed_but_not_searchable(store):
+    await store.async_setup()
+    await store.async_append_log("Updated:\n- wiki/solar.md")
+    await store.async_remember("solar inverter is a Fronius", topic="solar")
+
+    results = await store.async_search("solar")
+    assert results, "the real note must still be findable"
+    assert not any(r["path"] == "log.md" for r in results)
+    assert "log.md" in (store._root / "INDEX.md").read_text()
+
+
+async def test_log_appends_dated_entries(store):
+    await store.async_setup()
+    await store.async_append_log("first run")
+    await store.async_append_log("second run")
+    body = (store._root / "log.md").read_text()
+    assert body.count("## ") == 2
+    assert "first run" in body and "second run" in body
+    assert body.index("first run") < body.index("second run")
+
+
+async def test_index_renders_load_when(store):
+    await store.async_setup()
+    (store._root / "wiki").mkdir(exist_ok=True)
+    (store._root / "wiki" / "solar.md").write_text(
+        "---\ntitle: solar\ntags: solar\nload_when: questions about the PV system\n---\n- 8 panels\n"
+    )
+    await store.async_remember("trigger a reindex", topic="misc")
+    index = (store._root / "INDEX.md").read_text()
+    assert "load when: questions about the PV system" in index
+
+
+async def test_log_frontmatter_is_parseable_and_routes(store):
+    """Regression: load_when was once appended after the closing --- delimiter."""
+    await store.async_setup()
+    await store.async_append_log("first run")
+    from custom_components.second_brain.store import _parse_frontmatter
+
+    front, body = _parse_frontmatter((store._root / "log.md").read_text())
+    assert front["title"] == "log"
+    assert "changed recently" in front["load_when"]
+    assert "first run" in body
+    await store.async_remember("trigger a reindex", topic="misc")
+    assert "load when: the user asks what changed" in (store._root / "INDEX.md").read_text()

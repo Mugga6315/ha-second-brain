@@ -24,6 +24,16 @@ class BrainAPI(llm.API):
             UpdateMemoryTool(self._store),
             ForgetTool(self._store),
         ]
+        # --- HA data seam (optional feature; see docs/HA_DATA.md to remove) ---
+        # Guarded for the same reason as the MCP seam below: a broken optional
+        # feature must never cost the user their brain tools.
+        try:
+            from .ha_data import async_extra_tools as ha_data_tools
+
+            tools += ha_data_tools(self.hass)
+        except Exception:
+            LOGGER.exception("HA data tools unavailable — continuing without them")
+        # --- end HA data seam ---
         # --- MCP proxy seam (optional feature; see docs/MCP.md to remove) ---
         # Guarded: the proxy is optional, so nothing it does may cost the user
         # their brain tools. A missing module (partial deploy) or an unreachable
@@ -61,16 +71,16 @@ class SearchBrainTool(llm.Tool):
     ) -> dict:
         results = await self._store.async_search(tool_input.tool_args["query"])
         if not results:
-            return {
-                "result": (
-                    "No results found. Nothing about this is stored in the brain. "
-                    "Do NOT search again with different wording - answer from your "
-                    "other tools, or tell the user the information is not stored."
-                )
-            }
+            notes = await self._store.async_list_notes()
+            if notes:
+                return {"result": "No matches. Available notes:\n" + "\n".join(f"- {n}" for n in notes)}
+            return {"result": "No results found."}
         lines = ["Search results:"]
         for r in results:
-            lines.append(f"- {r['path']} (score: {r['score']})\n  {r['snippet']}")
+            if r.get("linked_from"):
+                lines.append(f"- {r['path']} (linked from {r['linked_from']})\n  {r['snippet']}")
+            else:
+                lines.append(f"- {r['path']} (score: {r['score']})\n  {r['snippet']}")
         return {"result": "\n".join(lines)}
 
 

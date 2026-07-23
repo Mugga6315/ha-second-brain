@@ -34,8 +34,11 @@ Companion to PLAN.md — verified facts, API pointers, commands. Collected 2026-
   core-venv installs; degrade to no-commits with one warning log.
 - Zero pip requirements needed: stdlib + HA helpers only. No `mcp` SDK, no dulwich,
   no YAML lib (frontmatter = ~15-line prefix parser for `title:`/`tags:`).
-- Conversation agents cap ~10 tool iterations per turn (local_openai:
-  `MAX_TOOL_ITERATIONS = 10` in entity.py). Keep tool count at 3.
+- Conversation agents cap ~10 tool *iterations* per turn (local_openai:
+  `MAX_TOOL_ITERATIONS = 10` in entity.py). That is a per-turn call budget, not a
+  tool-count limit. The API now registers 8 tools (5 memory + 3 `ha_data`) plus
+  the dormant `query_ha`; keep additions deliberate since HA core warns tool
+  accuracy degrades past ~30-50 tools (`docs/RESEARCH.md` R7).
 
 ## Commands
 

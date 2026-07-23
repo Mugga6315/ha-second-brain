@@ -1,5 +1,13 @@
 # Second Brain for Home Assistant Voice Assistant
 
+> **Historical — the original v1 design plan (2026-07-15).** Kept as the design
+> record. Current state and open work live in `ROADMAP.md`; current design in
+> `docs/` (HA_DATA, MCP, RESEARCH, KNOWN_ISSUES). Details below have since moved
+> on: the store now registers 8 tools (not 3), added `log.md` + a lint pass,
+> native `ha_data` tools (statistics/history/calendar), and `search_brain`
+> follows `[[wikilinks]]`; the MCP/ha-mcp path is now the dormant, removable
+> proxy (`docs/MCP.md`). Read this for intent, not for the current shape.
+
 ## Context
 
 The `local_openai` component (this repo) connects local LLM backends to HA's voice pipeline, but the Assist pipeline is limited by design: no historic data, no persistent knowledge about the home, system prompt is static. Goal: a full personal assistant with a "second brain" — persistent, markdown-based knowledge (Karpathy LLM-Wiki style) the assistant reads every turn and writes to when told "remember X", plus deeper HA access (history, automations) via ha-mcp.

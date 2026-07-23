@@ -45,8 +45,11 @@ class Consolidator:
 
         wiki_updates = plan.get("wiki_updates", [])
         memories_to_clear = plan.get("memories_to_clear", [])
+        lint_findings = [
+            str(f) for f in plan.get("lint_findings", []) if str(f).strip()
+        ]
 
-        if not wiki_updates and not memories_to_clear:
+        if not wiki_updates and not memories_to_clear and not lint_findings:
             LOGGER.info("Consolidator: nothing to do")
             return "Nothing to consolidate."
 
@@ -71,17 +74,24 @@ class Consolidator:
             )
             return f"Refusing to clear {total_lines} lines (cap {MAX_DELETE_LINES})."
 
+        written, cleared = [], []
         for update in wiki_updates:
             try:
                 await self._store.async_write_note(update["path"], update["content"])
+                written.append(update["path"])
             except ValueError as e:
                 LOGGER.warning("Consolidator: %s, skipping", e)
 
         for item in memories_to_clear:
             try:
                 await self._store.async_clear_memory(item["path"], item["containing"])
+                cleared.append(f"{item['path']} ({item['containing']})")
             except ValueError as e:
                 LOGGER.warning("Consolidator: %s, skipping", e)
+
+        await self._store.async_append_log(
+            self._log_entry(written, cleared, lint_findings)
+        )
 
         await self._store.async_commit(
             f"consolidate: {len(wiki_updates)} wiki updates, {len(memories_to_clear)} memories cleared",
@@ -135,6 +145,23 @@ class Consolidator:
             resp.raise_for_status()
             data = await resp.json()
             return data["choices"][0]["message"]["content"]
+
+    @staticmethod
+    def _log_entry(
+        written: list[str], cleared: list[str], lint_findings: list[str]
+    ) -> str:
+        """One readable entry: what the run changed, and what lint fixed."""
+        lines = []
+        if written:
+            lines.append("Updated:")
+            lines += [f"- {p}" for p in written]
+        if cleared:
+            lines.append("Cleared from memories:")
+            lines += [f"- {c}" for c in cleared]
+        if lint_findings:
+            lines.append("Lint:")
+            lines += [f"- {f}" for f in lint_findings]
+        return "\n".join(lines) or "No changes."
 
     @staticmethod
     def _count_bullets(text: str) -> int:

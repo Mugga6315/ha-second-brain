@@ -1,193 +1,69 @@
-# Roadmap — v1 TODOs
+# Roadmap
 
-All items below are v1 work, ordered by dependency. Executed by hand; sketches
-are the spec.
+Agreed code changes, in two tracks:
 
-## 1. [x] NAS-offline guard
+- **Track A - Knowledge store.** The markdown/git second brain. Core purpose.
+- **Track B - Home Assistant data.** Model access to HA state, history, statistics.
 
-Store lives on the NAS share. If HA boots while the mount is down, current
-setup `mkdir -p`s a fresh empty shadow store at the mount path → assistant runs
-with amnesia, stores diverge when the mount returns.
-
-- `store.py`: add `def exists(self) -> bool: return (self._root / "CORE.md").exists()`
-- `__init__.py` in `async_setup_entry`, before `store.async_setup()`:
-  - if `entry.data.get("initialized")` and not exists →
-    `raise ConfigEntryNotReady("store not found - network share offline?")`
-    (HA auto-retries setup with backoff until the share is back)
-  - after first successful setup: `hass.config_entries.async_update_entry(entry,
-    data={**entry.data, "initialized": True})`
-- Import `ConfigEntryNotReady` from `homeassistant.exceptions`.
-- Test: entry with `initialized=True` + empty tmp dir → setup raises.
-
-## 2. [x] Options flow (configuration UI)
-
-"Configure" button to adjust prompt char budgets after setup.
-
-- `const.py`: add `CONF_CORE_CHARS/RULES_CHARS/INDEX_CHARS/NOTE_CHARS` keys.
-- `store.py`: `Store.__init__` takes the four budgets as params (defaults =
-  current consts); replace module-const usage in `async_get_standing_context`
-  and `async_read_note` with `self._core_chars` etc.
-- `config_flow.py`: `SecondBrainOptionsFlow(OptionsFlow)`, single
-  `async_step_init` form (four int fields, `vol.Coerce(int)` + `vol.Range`),
-  defaults from `self.config_entry.options` falling back to consts; wire via
-  `@staticmethod async_get_options_flow`.
-- `__init__.py`: read budgets from `entry.options` when building the Store;
-  `entry.add_update_listener` reloads the entry so changes apply immediately.
-- `strings.json` + `translations/en.json`: options step labels.
-- Test: Store with tiny budgets truncates standing context / note.
-- (The consolidator below adds its own options fields — same form.)
-
-## 3. [x] Built-in consolidation agent (self-contained, no external AI Task)
-
-Decision: do NOT depend on the `local_openai` AI Task entity — second_brain
-drives its own LLM calls so it stays standalone. Copy the pattern, not the
-dependency.
-
-**Own LLM client (copied logic from local_openai):**
-- local_openai does: `openai.AsyncOpenAI(base_url=..., api_key=...)` in
-  `__init__.py`, then `client.chat.completions.create(...)` in `entity.py`.
-- Standalone equivalent WITHOUT a new pip dependency: plain `aiohttp` POST to
-  `{base_url}/v1/chat/completions` (HA ships aiohttp; use
-  `homeassistant.helpers.aiohttp_client.async_get_clientsession(hass)`).
-  Non-streaming single call is all the consolidator needs.
-- Config (options flow): `llm_base_url`, `llm_api_key` (optional), `llm_model`.
-  Point it at the same vLLM/llama.cpp server the voice agent uses — or a
-  bigger model, since there is no latency pressure here.
-
-**Trigger — cron, not per-ask (decided reasoning):**
-- Per-ask reflection would need the conversation text, which only the
-  conversation agent has — a standalone component cannot see chat content.
-  It would also add latency/cost to every voice command.
-- The improved prompt guidance already makes the chat model persist
-  corrections into the store; the consolidator then cleans what landed.
-- So: scheduled run via `homeassistant.helpers.event.async_track_time_change`
-  (e.g. nightly 03:00, time configurable in options) PLUS a
-  `second_brain.consolidate` service for manual/button/automation trigger.
-- Optional future hook: a per-conversation extraction pass is only possible
-  with agent cooperation (hook in local_openai firing after each turn).
-  Keep as an optional integration point, not a requirement.
-
-**Consolidation job:**
-- **Input**: contents of `memories/`, relevant `wiki/` pages, and
-  `git log --since=<last run>` so the task knows what's new.
-- **Prompt** lives as a file in the store (`CONSOLIDATE.md`), user-editable
-  like CORE.md: merge new memory bullets into the matching `wiki/` page
-  (create if missing), drop exact duplicates, mark superseded facts, empty
-  processed bullets out of `inbox.md`, never touch `CORE.md`.
-- **Frontmatter = index quality**: INDEX.md is regenerated mechanically from
-  frontmatter on every write; the consolidator writes proper `title:`/`tags:`
-  frontmatter and the index inherits the quality. No separate index-LLM.
-- **Internal tools**: richer Store methods the consolidator may need
-  (update_note, archive, rename) are added as Store methods only — NOT
-  exposed to the voice model. Voice model keeps its dumb verbs.
-- **Write path**: same Store machinery — reindex, git commit as separate
-  author (`Second Brain Consolidator <consolidator@ha.local>`), so
-  `git log --author=Consolidator` shows exactly what changed, revertable.
-- **Safety rails**: hard cap on deletion (diff removing more than N lines →
-  abort and log). Parse-failure of LLM output → abort, no partial writes.
-- Division of labor stands: voice/chat model = dumb verbs
-  (remember/update_memory/forget); consolidator LLM owns ALL organization.
+✅ shipped · 🔨 agreed, not built · ⏸ deferred with a stated trigger. Measurements behind these items: `docs/RESEARCH.md`.
 
 ---
 
-## Later (not v1)
+## Track A - Knowledge store
 
-- **Review panel**: HA panel/dashboard listing recent assistant + consolidator
-  commits with diff view and one-click `git revert`. Until built:
-  `git log`/`git revert` via SSH.
-- **Index caching / inverted search index**: internal word→file lookup map for
-  search performance (NOT INDEX.md). Only relevant when the store outgrows
-  ~1k files — skip if never reached.
-- **README: thinking-budget guidance**: once `thinking_token_budget` lands in
-  `local_openai` (vLLM), document a recommended voice-use cap (~300-500
-  tokens) — testing showed deliberation length, not prompt size, is the real
-  token hog.
+| | Item |
+|---|---|
+| ✅ | **A1 NAS-offline guard.** `ConfigEntryNotReady` when an initialized store is missing, instead of creating an empty shadow store. |
+| ✅ | **A2 Options flow.** Four prompt char budgets, live reload on change. |
+| ✅ | **A3 Consolidation agent.** Nightly plus `second_brain.consolidate` service; own aiohttp LLM client; prompt in `CONSOLIDATE.md`; commits as `Second Brain Consolidator`. |
+| ✅ | **A4 Store hardening.** `update_memory` refuses to halve a topic or to replace a truncated `rules.md`; `forget("rules")` needs `containing`; consolidator cannot touch `rules.md`; `CONSOLIDATE.md` out of search and index. |
+| ✅ | **A5 Empty search lists the store** instead of returning nothing. |
+| ✅ | **A6 `log.md` and a lint pass.** Consolidator appends a dated entry per run (updated / cleared / lint) and fixes the wiki as it merges: superseded facts marked, duplicates removed, contradictions corrected, every change named in the log. `log.md` is indexed and readable but excluded from search. |
+| ✅ | **A7 Index routes, not just lists.** Consolidator writes `load_when` frontmatter; `INDEX.md` renders it under each entry. |
+| ✅ | **A7b Search follows `[[wikilinks]]`.** The store is an Obsidian vault, so notes are linked by hand; `search_brain` now follows those links one hop (capped, deduped, marked "linked from"), surfacing a note the query missed but a curated link points at - the keep-markdown alternative to embeddings (R4). |
 
-## v2 — [x] HA tool proxy (universal MCP passthrough)
+**⏸ A8. BM25 / inverted index.** Trigger: store passes ~1k files or search shows up in voice latency. Not embeddings (R4).
 
-**Problem**: external MCP servers expose 60-90+ HA tools directly to the LLM.
-Small local models degrade past ~10 tools.
+**⏸ A9. Review panel.** HA panel with commit diffs and one-click revert. Until then: `git log` / `git revert` over SSH.
 
-**Shipped**: one voice-facing `query_ha(tool_name, arguments)` tool that forwards
-verbatim to the MCP server. The LLM sees a single tool whose description is
-generated at runtime from the server's own `tools/list` `inputSchema`.
+---
 
-**Why the keyword-router sketch below was dropped**: it hardcoded one server's
-schema. Measured against two real servers:
+## Track B - Home Assistant data
 
-| | ganhammar/hass-mcp-server | homeassistant-ai/ha-mcp |
-|---|---|---|
-| tool names | `get_history` | `ha_get_history` |
-| entity param | `entity_id` (string) | `entity_ids` (array) |
-| time format | ISO only | relative (`"4d"`) |
-| statistics | separate `get_statistics` | folded: `get_history(source=statistics)` |
-| annotations | none | none |
+> The MCP proxy (B1-B4) is kept but **dormant** since 2026-07-23: correctness-critical paths moved to the native tools (B5/B5b) and the MCP URL is cleared on the test instance, so nothing routes through it. It stays as an isolated, removable component - reasoning in `docs/RESEARCH.md` R3.
 
-No `_build_args` can serve both. Handing the model the server's advertised schema
-does — verified live: the model reads the generated description and fills correct
-args first try, same code, either server.
+| | Item |
+|---|---|
+| ✅ | **B1 MCP passthrough.** One `query_ha(tool_name, arguments)` rendered from the server's own `inputSchema`; `mcp_read_only` hides writes by name-verb heuristic; ~90 lines of routing deleted. |
+| ✅ | **B2 Proxy hardening.** Names as quoted `tool_name` values, exact-name/prefix instruction, stringified `arguments` parsed, empty responses explain the real causes and attach full tool docs, second empty call stops the loop. |
+| ✅ | **B3 Diagnostics platform.** One click: store contents plus a live MCP probe (reachable, read-only, tool counts, exposed vs hidden). |
+| ✅ | **B4 Statistics delta hint.** Per-entity `last.sum - first.sum` appended for both server response shapes, after truncation, with units. Now only relevant when the MCP proxy is in use. |
+| ✅ | **B5 Native recorder tools.** `get_statistics` and `get_history` in `ha_data.py`, a removable seam (`docs/HA_DATA.md`). Metric picked from recorder metadata (`change` for sums, mean/min/max for measurements), row size derived from the span, answers rather than rows, every response echoing range/period/unit. |
+| ✅ | **B5b Native calendar tool.** `get_calendar_events` in the same seam: any range across every exposed calendar, merged in date order with the source named, where core's `calendar_get_events` does one calendar and only today/this-week. Ranges are inclusive (RFC 5545 end is exclusive; a bare end date is extended a day). Exposure gap documented - `calendar` is not in `DEFAULT_EXPOSED_DOMAINS` (`docs/KNOWN_ISSUES.md`). Tool-choice verified live 2026-07-23: the model reliably picks this over the core tool for every calendar phrasing, so no precedence directive was needed (the candidate to add one was dropped after verifying - see the prefer-HA-native tip). |
+| ✅ | **B5c Friendly-name resolution.** `get_statistics`/`get_history` resolve a friendly name or alias to an entity_id (`_resolve_entity`) - the model sometimes sends "Leinwand-Relay Energy" instead of `sensor.leinwand_relay_energy` (observed live), which used to read as "no statistics". Converges on HA-native name handling (not a divergence); a name matching nothing keeps the honest error. |
 
-**Implementation**:
+**🔨 B6. Pin the answerable solar entity (prod).** On prod, `sensor.solar_production_*` are SQL/template sensors with no recorder history or `state_class`, so no tool can answer "solar last 4 days" from them (R5); the answerable entity is the underlying Energy-dashboard `total_increasing` kWh sensor. Rechecked 2026-07-23:
+- Still needed - B5c name-resolution does not help (a genuinely unrecorded sensor, not a name mismatch), and the `get_statistics` error guides the model to "pick the underlying entity" but it usually cannot discover a hidden/unexposed one.
+- Reframe: make it a **`wiki/solar.md` knowledge page** with `load_when: solar/PV production questions` naming the entity, not a `rules.md` entry - which entity answers what is knowledge, not behaviour (keeps `rules.md` lean; `load_when` index routing sends solar questions to it, verified working live).
+- Blocked: needs the prod `total_increasing` entity id **and** prod access - this session has only the test instance.
 
-- `QueryHATool(tool_name, arguments)` — passthrough. No routing, no arg building.
-- Description rendered from `inputSchema`: `name(required, [optional]) — desc`.
-- Deleted (~90 lines): `_INTENT_MAP`, `_CANONICAL_ALIASES`, `_route`,
-  `_resolve_tool`, `_build_args`, `_parse_time_range`, `_trim`.
-- Responses capped at `QUERY_HA_MAX_CHARS`. Generic — per-tool field stripping
-  only ever worked on one server's response shape.
-- `mcp_read_only` option (default on) hides write tools. No MCP server observed
-  exposes the spec's `readOnlyHint`/`destructiveHint`, so detection is a
-  name-verb heuristic with a read-prefix override (`get_`/`list_`/`search_`/
-  `describe_` always readable). On ganhammar: 29 of 67 tools hidden.
-- Proxy honours the server-negotiated `protocolVersion`.
+**⏸ B7. `mcp_tools` allowlist option.** Comma-separated names in the options flow, empty = all read tools. Cuts the injected catalog from ~3.2k tokens to ~200. ~15 lines. Trigger: prompt weight becomes the target, or B5 lands and the proxy's job narrows to the long tail. Note: HA core is building native importance-filtering + a deferred tool search (R7) that supersedes this - keep it thin, or skip and adopt core's when it ships.
 
-**`HA_TOOLS.md` routing file: not needed.** Its purpose was to keep per-server
-routing out of code; the passthrough removes the routing entirely.
+**⏸ B8. Split Track B into its own registered `llm.API`.** Second API (`Second Brain: HA Data`) alongside the memory API, llm_intents-style, instead of more tools on one API. Trigger: three or more native tools in Track B - **now met** (statistics, history, calendar), so this is a live decision awaiting your call, not a deferred one. Context: HA core's harness redesign (R7) adds exactly this - separate Management/Lists/Calendar surfaces via `async_register_tool(apis=...)`. A split now should mirror that shape so it converges rather than diverges.
 
-**Open questions — resolved**:
+---
 
-- *read-only, or allow writes?* → read-only default; `mcp_read_only=false` opts
-  in. Hides `delete_automation`, `restart_ha`, `save_config_file`,
-  `call_service`, etc.
-- *keyword router or cheap LLM router?* → neither. The model already picks the
-  tool from the schema, so a second LLM call buys nothing.
-- *large responses?* → generic char cap. Summarization stays v3.
+## ❌ Dropped
 
-**Known test-instance gap**: `sensor.test_solar_production_today` has no
-long-term statistics recorded, so `get_statistics` correctly returns `[]`.
-Solar demos need stats on that sensor, or a different entity.
+- **git commit retry** - single writer per store; only the commit can race, and the note still lands.
+- **update_note/archive as voice tools** - `update_memory` + `forget` are enough; richer editing is the consolidator's.
+- **External AI Task dependency** - replaced by the built-in aiohttp client (A3).
+- **`HA_TOOLS.md` routing file** - the passthrough removed the routing it was meant to hold.
+- **Prompt-only fix for cumulative `sum`** - measured and rejected (R1).
+- **Embeddings / vector store for search** (R4).
+- **A separate "HA harness" repo** - llm_intents already is that pattern; our own tools belong in a registered `llm.API` (R2).
 
-## v3 — Response interpretation
+## Known instance gaps
 
-**Status**: open, and now demonstrated rather than hypothetical.
-
-Live test 2026-07-22, *"wie viel Energie hat das Leinwand-Relay in den letzten 5
-Tagen verbraucht?"* — the proxy returned correct daily statistics buckets, but
-the model answered **0,164 kWh** when the true figure is **~0 kWh**: every
-bucket's `sum` was identical (`0.0362333`), and HA's `sum` is a cumulative
-counter that must be differenced, not added.
-
-Two model-level failures in that session, neither a proxy bug:
-
-- **Cumulative vs delta**: model adds `sum` values instead of differencing them.
-- **Stale clock**: asked for "last 4 days" on 2026-07-22, it built the window
-  `2026-07-12 → 2026-07-15` from static-context timestamps instead of calling
-  `GetDateTime`.
-
-**First attempt is prompt, not code** — both are addressed by rules R1/R2 in
-`memories/rules.md`. Fixing them in the proxy would mean re-hardcoding HA
-response semantics, exactly what v2 removed. Only if rules prove insufficient
-should a summarization pass be built.
-
-**Alternative if rules fail**: local aggregation in Python (difference the
-`sum` series) — faster and free, but hardcodes HA statistics semantics into a
-server-agnostic proxy. Weigh carefully.
-
-## Dropped
-
-- **git commit retry**: single HA instance writes per store folder; even with
-  two writers the note itself lands and only the commit can race.
-- **update_note/archive as voice-model tools**: `update_memory` + `forget`
-  cover the voice model; richer editing belongs to the consolidator.
-- **External AI Task dependency for consolidation**: replaced by built-in
-  aiohttp LLM client (item 3).
+- Test box: `sensor.test_solar_production_today` has no long-term statistics; use `sensor.leinwand_relay_energy`.
+- Prod: `sensor.solar_production_*` are SQL sensors with no recorder history (R5).

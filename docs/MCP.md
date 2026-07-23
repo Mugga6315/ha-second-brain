@@ -5,6 +5,15 @@ that lets the voice model reach Home Assistant's own data (state, history,
 statistics, services) through an external MCP server. It is deliberately
 **isolated and removable**: it is one module plus four marked seams.
 
+> **Dormant since 2026-07-23.** The correctness-critical paths — statistics,
+> history and calendar — moved to native in-process tools (`ha_data.py`,
+> ROADMAP B5/B5b/B5c), which pick the right recorder primitive themselves. The
+> `mcp_url` is cleared on the test instance, so nothing routes through the proxy;
+> it stays in the tree as the removable long-tail path (automations, dashboards,
+> logs, registry) only. Reasoning in `docs/RESEARCH.md` R3, and R7 on why HA core
+> is building an equivalent natively. Everything below still describes how the
+> proxy works when a `mcp_url` is set.
+
 ## Design: server-agnostic passthrough
 
 The proxy **never builds tool arguments**. It renders each tool's advertised
