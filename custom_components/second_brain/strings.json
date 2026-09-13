@@ -1,0 +1,89 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Second Brain",
+        "description": "Persistent markdown knowledge store for your voice assistant. The chosen folder is used directly as the store - markdown files are created inside it. Leave LLM fields empty to disable the consolidator; everything here can be changed later under Configure.",
+        "data": {
+          "store_location": "Store location",
+          "core_chars": "Max chars of CORE.md in prompt",
+          "rules_chars": "Max chars of rules in prompt",
+          "index_chars": "Max chars of INDEX.md in prompt",
+          "note_chars": "Max chars when reading a note",
+          "llm_base_url": "LLM base URL for consolidation (e.g. http://localhost:11434/v1)",
+          "llm_api_key": "LLM API key (optional, leave empty for local servers)",
+          "mcp_url": "MCP server URL for HA tool proxy (e.g. http://localhost:8123/api/mcp)",
+          "mcp_token": "MCP server bearer token (HA long-lived access token)",
+          "mcp_read_only": "MCP read-only (hide write/control tools from the model)",
+          "consolidate_enabled": "Enable nightly consolidation",
+          "consolidate_time": "Time to run nightly consolidation"
+        }
+      },
+      "model": {
+        "title": "Select consolidation model",
+        "description": "Available models from {url}. You can also type a custom model name.",
+        "data": {
+          "llm_model": "Model"
+        }
+      },
+      "store_info": {
+        "title": "Existing store detected",
+        "description": "Found existing Second Brain data in the selected folder: {found}.\n\nThese files will be used as-is. Click Continue to proceed."
+      }
+    },
+    "error": {
+      "llm_unreachable": "LLM endpoint validation failed: {error}",
+      "mcp_unreachable": "MCP server validation failed: {error}"
+    },
+    "abort": {
+      "already_configured": "Second Brain is already configured. Only one instance is supported."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Second Brain options",
+        "description": "Adjust prompt budgets, store location, and consolidation settings. The chosen folder is used directly as the store root. Existing files are not moved when the location changes. Leave LLM fields empty to disable the consolidator.",
+        "data": {
+          "store_location": "Store location",
+          "core_chars": "Max chars of CORE.md in prompt",
+          "rules_chars": "Max chars of rules in prompt",
+          "index_chars": "Max chars of INDEX.md in prompt",
+          "note_chars": "Max chars when reading a note",
+          "llm_base_url": "LLM base URL for consolidation (e.g. http://localhost:11434/v1)",
+          "llm_api_key": "LLM API key (optional, leave empty for local servers)",
+          "mcp_url": "MCP server URL for HA tool proxy (e.g. http://localhost:8123/api/mcp)",
+          "mcp_token": "MCP server bearer token (HA long-lived access token)",
+          "mcp_read_only": "MCP read-only (hide write/control tools from the model)",
+          "consolidate_enabled": "Enable nightly consolidation",
+          "consolidate_time": "Time to run nightly consolidation"
+        }
+      },
+      "model": {
+        "title": "Select consolidation model",
+        "description": "Available models from {url}. You can also type a custom model name.",
+        "data": {
+          "llm_model": "Model"
+        }
+      },
+      "store_info": {
+        "title": "Existing store detected",
+        "description": "Found existing Second Brain data in the selected folder: {found}.\n\nThese files will be used as-is. Click Continue to proceed."
+      }
+    },
+    "error": {
+      "llm_unreachable": "LLM endpoint validation failed: {error}",
+      "mcp_unreachable": "MCP server validation failed: {error}"
+    }
+  },
+  "issues": {
+    "no_agent_selected": {
+      "title": "No conversation agent is using Second Brain",
+      "description": "Second Brain is set up, but no conversation agent has selected it, so the assistant has no access to your notes and cannot remember anything.\n\nOpen your conversation agent's options (for example Settings > Devices & services > your LLM integration) and tick **Second Brain** under the control/LLM API setting."
+    },
+    "calendars_not_exposed": {
+      "title": "Calendars are not exposed to the assistant",
+      "description": "`get_calendar_events` can only read calendars that are exposed to Assist, and Home Assistant does not expose the calendar domain by default - so appointment questions currently return nothing.\n\nGo to Settings > Voice assistants > Expose and expose the calendars you want the assistant to read."
+    }
+  }
+}

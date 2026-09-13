@@ -1,0 +1,16 @@
+{
+  "domain": "second_brain",
+  "name": "Second Brain",
+  "codeowners": [
+    "@Mugga6315"
+  ],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/Mugga6315/ha-second-brain",
+  "integration_type": "service",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/Mugga6315/ha-second-brain/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "1.0.0"
+}

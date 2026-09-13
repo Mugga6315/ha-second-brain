@@ -1,0 +1,7 @@
+consolidate:
+  name: Consolidate memories
+  description: >-
+    Run the consolidation agent to merge raw memories into curated wiki pages,
+    triage misfiled rules and learn from recorded tool failures. Holds the
+    store lock for the whole run, so new memories queue until it finishes -
+    up to 10 minutes on a slow model. Returns a summary of what it changed.

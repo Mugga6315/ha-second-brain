@@ -1,0 +1,6 @@
+homeassistant==2026.8.0  # pin: must match the test instance, see docs/KNOWN_ISSUES.md
+hassil
+home-assistant-intents
+voluptuous
+pytest
+pytest-asyncio
