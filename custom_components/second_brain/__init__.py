@@ -68,8 +68,19 @@ async def async_setup_entry(hass, entry: ConfigEntry) -> bool:
         proxy, mcp_read_only = build_proxy(hass, entry), read_only_from_entry(entry)
     except Exception:
         LOGGER.exception("MCP proxy unavailable — loading without query_ha")
-    api = BrainAPI(hass, store, proxy=proxy, mcp_read_only=mcp_read_only)
     # --- end MCP proxy seam ---
+    # --- Emby seam (optional feature; see docs/EMBY.md to remove) ---
+    # Guarded: an absent module or bad Emby config must not stop the integration
+    # loading. Worst case the store still works without the Emby tools.
+    emby = None
+    try:
+        from .emby import build_client
+
+        emby = build_client(hass, entry)
+    except Exception:
+        LOGGER.exception("Emby unavailable — loading without Emby tools")
+    # --- end Emby seam ---
+    api = BrainAPI(hass, store, proxy=proxy, mcp_read_only=mcp_read_only, emby=emby)
     entry.async_on_unload(llm.async_register_api(hass, api))
 
     await _setup_consolidator(hass, entry, store)

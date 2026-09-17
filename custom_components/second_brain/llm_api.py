@@ -7,11 +7,12 @@ from .const import DOMAIN, LOGGER
 
 
 class BrainAPI(llm.API):
-    def __init__(self, hass, store, proxy=None, mcp_read_only=True) -> None:
+    def __init__(self, hass, store, proxy=None, mcp_read_only=True, emby=None) -> None:
         super().__init__(hass=hass, id=DOMAIN, name="Second Brain")
         self._store = store
         self._proxy = proxy
         self._mcp_read_only = mcp_read_only
+        self._emby = emby
 
     async def async_get_api_instance(
         self, llm_context: llm.LLMContext
@@ -34,6 +35,16 @@ class BrainAPI(llm.API):
         except Exception:
             LOGGER.exception("HA data tools unavailable — continuing without them")
         # --- end HA data seam ---
+        # --- Emby seam (optional feature; see docs/EMBY.md to remove) ---
+        # Guarded like the other seams: a broken or unconfigured Emby feature
+        # must never cost the user their brain tools.
+        try:
+            from .emby import async_extra_tools as emby_tools
+
+            tools += emby_tools(self._emby, self._store.async_record_failure)
+        except Exception:
+            LOGGER.exception("Emby tools unavailable — continuing without them")
+        # --- end Emby seam ---
         # --- MCP proxy seam (optional feature; see docs/MCP.md to remove) ---
         # Guarded: the proxy is optional, so nothing it does may cost the user
         # their brain tools. A missing module (partial deploy) or an unreachable

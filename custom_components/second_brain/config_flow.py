@@ -147,6 +147,25 @@ class _BrainFlowSteps:
                 )
             # --- end MCP proxy seam ---
 
+            # --- Emby seam (optional feature; see docs/EMBY.md to remove) ---
+            # Guarded like the MCP seam: a missing module or a broken Emby server
+            # must cost the user the Emby feature and nothing else.
+            emby_error = None
+            try:
+                from .emby import async_validate_options as _emby_validate
+
+                emby_error = await _emby_validate(self.hass, user_input)
+            except Exception:
+                LOGGER.exception("Emby validation unavailable — skipping")
+            if emby_error:
+                return self.async_show_form(
+                    step_id=self._first_step,
+                    data_schema=await self._init_schema(opts),
+                    errors={"base": "emby_unreachable"},
+                    description_placeholders={"error": emby_error},
+                )
+            # --- end Emby seam ---
+
             store_path = user_input.get(CONF_STORE_LOCATION, "")
             existing = await self.hass.async_add_executor_job(
                 _detect_existing_store, store_path
@@ -234,6 +253,9 @@ class _BrainFlowSteps:
         # --- MCP proxy seam (see docs/MCP.md to remove) ---
         from .mcp_proxy import options_schema as _mcp_options_schema
         # --- end MCP proxy seam ---
+        # --- Emby seam (see docs/EMBY.md to remove) ---
+        from .emby import options_schema as _emby_options_schema
+        # --- end Emby seam ---
         locations = await self.hass.async_add_executor_job(_detect_locations, self.hass)
         current_location = opts.get(CONF_STORE_LOCATION, self.hass.config.config_dir)
         return vol.Schema(
@@ -278,6 +300,9 @@ class _BrainFlowSteps:
                 # --- MCP proxy seam (see docs/MCP.md to remove) ---
                 **_mcp_options_schema(opts),
                 # --- end MCP proxy seam ---
+                # --- Emby seam (see docs/EMBY.md to remove) ---
+                **_emby_options_schema(opts),
+                # --- end Emby seam ---
                 vol.Required(
                     CONF_CONSOLIDATE_ENABLED,
                     default=opts.get(CONF_CONSOLIDATE_ENABLED, True),

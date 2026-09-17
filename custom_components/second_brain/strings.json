@@ -15,6 +15,8 @@
           "mcp_url": "MCP server URL for HA tool proxy (e.g. http://localhost:8123/api/mcp)",
           "mcp_token": "MCP server bearer token (HA long-lived access token)",
           "mcp_read_only": "MCP read-only (hide write/control tools from the model)",
+          "emby_url": "Emby server URL for library search and playback (e.g. http://localhost:8096)",
+          "emby_api_key": "Emby API key (Emby dashboard > API Keys)",
           "consolidate_enabled": "Enable nightly consolidation",
           "consolidate_time": "Time to run nightly consolidation"
         }
@@ -33,7 +35,8 @@
     },
     "error": {
       "llm_unreachable": "LLM endpoint validation failed: {error}",
-      "mcp_unreachable": "MCP server validation failed: {error}"
+      "mcp_unreachable": "MCP server validation failed: {error}",
+      "emby_unreachable": "Emby server validation failed: {error}"
     },
     "abort": {
       "already_configured": "Second Brain is already configured. Only one instance is supported."
@@ -55,6 +58,8 @@
           "mcp_url": "MCP server URL for HA tool proxy (e.g. http://localhost:8123/api/mcp)",
           "mcp_token": "MCP server bearer token (HA long-lived access token)",
           "mcp_read_only": "MCP read-only (hide write/control tools from the model)",
+          "emby_url": "Emby server URL for library search and playback (e.g. http://localhost:8096)",
+          "emby_api_key": "Emby API key (Emby dashboard > API Keys)",
           "consolidate_enabled": "Enable nightly consolidation",
           "consolidate_time": "Time to run nightly consolidation"
         }
@@ -73,7 +78,8 @@
     },
     "error": {
       "llm_unreachable": "LLM endpoint validation failed: {error}",
-      "mcp_unreachable": "MCP server validation failed: {error}"
+      "mcp_unreachable": "MCP server validation failed: {error}",
+      "emby_unreachable": "Emby server validation failed: {error}"
     }
   },
   "issues": {

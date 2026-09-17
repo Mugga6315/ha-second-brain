@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 LOCAL_TESTING.md
+CLAUDE.md
 research/
 docs/
 ROADMAP.md
