@@ -371,3 +371,35 @@ class Consolidator:
                 if any(c.lower() in line_lower for c in containings):
                     count += 1
         return count
+
+
+# --- librarian subentry interface (see features.py) ---------------------------
+# The LLM (base URL / key / model + its dropdown) lives on the parent entry, so
+# this subentry only carries scheduling. The consolidator resolves the model via
+# llm_config.resolve_llm at setup.
+
+
+def subentry_schema(data: dict) -> dict:
+    import voluptuous as vol
+    from homeassistant.helpers.selector import TimeSelector
+
+    from .const import (
+        CONF_CONSOLIDATE_ENABLED,
+        CONF_CONSOLIDATE_TIME,
+        DEFAULT_CONSOLIDATE_TIME,
+    )
+
+    return {
+        vol.Required(
+            CONF_CONSOLIDATE_ENABLED, default=data.get(CONF_CONSOLIDATE_ENABLED, True)
+        ): bool,
+        vol.Required(
+            CONF_CONSOLIDATE_TIME,
+            default=data.get(CONF_CONSOLIDATE_TIME, DEFAULT_CONSOLIDATE_TIME),
+        ): TimeSelector(),
+    }
+
+
+async def async_validate(hass, data: dict) -> str | None:
+    """Nothing to validate here — the LLM is configured and checked on the parent."""
+    return None

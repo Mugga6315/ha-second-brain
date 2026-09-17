@@ -4,17 +4,21 @@ import os
 from typing import Any
 
 import voluptuous as vol
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult, OptionsFlow
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    ConfigSubentryFlow,
+    OptionsFlow,
+)
+from homeassistant.core import callback
 from homeassistant.helpers.selector import (
     SelectSelector,
     SelectSelectorConfig,
     SelectSelectorMode,
-    TimeSelector,
 )
 
 from .const import (
-    CONF_CONSOLIDATE_ENABLED,
-    CONF_CONSOLIDATE_TIME,
     CONF_CORE_CHARS,
     CONF_INDEX_CHARS,
     CONF_LLM_API_KEY,
@@ -24,10 +28,8 @@ from .const import (
     CONF_RULES_CHARS,
     CONF_STORE_LOCATION,
     CORE_CHARS,
-    DEFAULT_CONSOLIDATE_TIME,
     DOMAIN,
     INDEX_CHARS,
-    LOGGER,
     NOTE_CHARS,
     RULES_CHARS,
 )
@@ -127,45 +129,6 @@ class _BrainFlowSteps:
             self._llm_base_url = base_url
             self._llm_api_key = api_key
 
-            # --- MCP proxy seam (optional feature; see docs/MCP.md to remove) ---
-            # Guarded like the other three seams: a missing module or a broken
-            # proxy must cost you query_ha and nothing else. Unguarded, a partial
-            # deploy took the whole options form down.
-            mcp_error = None
-            try:
-                from .mcp_proxy import async_validate_options
-
-                mcp_error = await async_validate_options(self.hass, user_input)
-            except Exception:
-                LOGGER.exception("MCP proxy validation unavailable — skipping")
-            if mcp_error:
-                return self.async_show_form(
-                    step_id=self._first_step,
-                    data_schema=await self._init_schema(opts),
-                    errors={"base": "mcp_unreachable"},
-                    description_placeholders={"error": mcp_error},
-                )
-            # --- end MCP proxy seam ---
-
-            # --- Emby seam (optional feature; see docs/EMBY.md to remove) ---
-            # Guarded like the MCP seam: a missing module or a broken Emby server
-            # must cost the user the Emby feature and nothing else.
-            emby_error = None
-            try:
-                from .emby import async_validate_options as _emby_validate
-
-                emby_error = await _emby_validate(self.hass, user_input)
-            except Exception:
-                LOGGER.exception("Emby validation unavailable — skipping")
-            if emby_error:
-                return self.async_show_form(
-                    step_id=self._first_step,
-                    data_schema=await self._init_schema(opts),
-                    errors={"base": "emby_unreachable"},
-                    description_placeholders={"error": emby_error},
-                )
-            # --- end Emby seam ---
-
             store_path = user_input.get(CONF_STORE_LOCATION, "")
             existing = await self.hass.async_add_executor_job(
                 _detect_existing_store, store_path
@@ -250,12 +213,6 @@ class _BrainFlowSteps:
         )
 
     async def _init_schema(self, opts: dict) -> vol.Schema:
-        # --- MCP proxy seam (see docs/MCP.md to remove) ---
-        from .mcp_proxy import options_schema as _mcp_options_schema
-        # --- end MCP proxy seam ---
-        # --- Emby seam (see docs/EMBY.md to remove) ---
-        from .emby import options_schema as _emby_options_schema
-        # --- end Emby seam ---
         locations = await self.hass.async_add_executor_job(_detect_locations, self.hass)
         current_location = opts.get(CONF_STORE_LOCATION, self.hass.config.config_dir)
         return vol.Schema(
@@ -297,30 +254,28 @@ class _BrainFlowSteps:
                     CONF_LLM_API_KEY,
                     description={"suggested_value": opts.get(CONF_LLM_API_KEY, "")},
                 ): str,
-                # --- MCP proxy seam (see docs/MCP.md to remove) ---
-                **_mcp_options_schema(opts),
-                # --- end MCP proxy seam ---
-                # --- Emby seam (see docs/EMBY.md to remove) ---
-                **_emby_options_schema(opts),
-                # --- end Emby seam ---
-                vol.Required(
-                    CONF_CONSOLIDATE_ENABLED,
-                    default=opts.get(CONF_CONSOLIDATE_ENABLED, True),
-                ): bool,
-                vol.Required(
-                    CONF_CONSOLIDATE_TIME,
-                    default=opts.get(CONF_CONSOLIDATE_TIME, DEFAULT_CONSOLIDATE_TIME),
-                ): TimeSelector(),
             }
         )
 
 
 class SecondBrainConfigFlow(_BrainFlowSteps, ConfigFlow, domain=DOMAIN):
     VERSION = 1
+    # minor_version 2: optional features moved from options fields to subentries
+    # (see async_migrate_entry).
+    MINOR_VERSION = 2
 
     # single_config_entry in the manifest is the native version of the old
     # _async_current_entries() check.
     _first_step = "user"
+
+    @classmethod
+    @callback
+    def async_get_supported_subentry_types(
+        cls, config_entry: ConfigEntry
+    ) -> dict[str, type[ConfigSubentryFlow]]:
+        from .features import supported_subentry_types
+
+        return supported_subentry_types()
 
     @property
     def _current(self) -> dict:

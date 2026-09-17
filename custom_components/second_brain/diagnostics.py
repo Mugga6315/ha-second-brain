@@ -10,7 +10,7 @@ from homeassistant.core import HomeAssistant
 
 from .const import CONF_LLM_API_KEY, CONF_STORE_LOCATION
 
-TO_REDACT = {CONF_LLM_API_KEY, "mcp_token"}
+TO_REDACT = {CONF_LLM_API_KEY, "mcp_token", "emby_api_key"}
 
 
 async def async_get_config_entry_diagnostics(
@@ -34,30 +34,12 @@ async def async_get_config_entry_diagnostics(
     return {
         "options": async_redact_data(dict(entry.options), TO_REDACT),
         "store": await hass.async_add_executor_job(_store_info),
-        "mcp": await _mcp_info(hass, entry),
+        "features": [
+            {
+                "type": subentry.subentry_type,
+                "title": subentry.title,
+                "data": async_redact_data(dict(subentry.data), TO_REDACT),
+            }
+            for subentry in entry.subentries.values()
+        ],
     }
-
-
-async def _mcp_info(hass: HomeAssistant, entry: ConfigEntry) -> dict:
-    """Live probe of the MCP server, so this reflects now, not startup."""
-    try:
-        from .mcp_proxy import _is_write, build_proxy, read_only_from_entry
-
-        proxy = build_proxy(hass, entry)
-        if proxy is None:
-            return {"configured": False, "query_ha_registered": False}
-        await proxy.async_initialize()
-        names = proxy.tool_names()
-        read_only = read_only_from_entry(entry)
-        hidden = [n for n in names if read_only and _is_write(n)]
-        return {
-            "configured": True,
-            "reachable": bool(names),
-            "read_only": read_only,
-            "query_ha_registered": bool(names),
-            "tools_total": len(names),
-            "tools_exposed": [n for n in names if n not in hidden],
-            "tools_hidden": hidden,
-        }
-    except Exception as e:  # noqa: BLE001 - diagnostics must never raise
-        return {"error": f"{type(e).__name__}: {e}"}

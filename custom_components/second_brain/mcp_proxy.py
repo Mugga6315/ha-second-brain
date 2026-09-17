@@ -362,27 +362,15 @@ class QueryHATool(llm.Tool):
         return {"result": result}
 
 
-# --- seams: the only entry points the core files call -------------------------
+# --- seams: the feature's subentry interface (see features.py) ----------------
 
 
-def build_proxy(hass, entry) -> MCPProxy | None:
-    """Build a proxy from the config entry options, or None if unconfigured."""
-    opts = entry.options
-    url = opts.get(CONF_MCP_URL, "").strip()
+async def async_extra_tools(hass, data: dict, record_failure=None) -> list[llm.Tool]:
+    """Tools this feature contributes, built from its subentry data."""
+    url = (data.get(CONF_MCP_URL) or "").strip()
     if not url:
-        return None
-    return MCPProxy(hass, url, opts.get(CONF_MCP_TOKEN, "").strip())
-
-
-def read_only_from_entry(entry) -> bool:
-    """Whether write tools should be hidden from the model (default: yes)."""
-    return entry.options.get(CONF_MCP_READ_ONLY, True)
-
-
-async def async_extra_tools(proxy, read_only: bool = True) -> list[llm.Tool]:
-    """Tools this feature contributes to BrainAPI. Empty when unconfigured."""
-    if not proxy or not proxy.available:
-        return []  # no mcp_url set — feature deliberately off, stay quiet
+        return []  # subentry present but no URL — send nothing
+    proxy = MCPProxy(hass, url, (data.get(CONF_MCP_TOKEN) or "").strip())
     await proxy.async_initialize()
     if not proxy.tools:
         # Configured but produced nothing: the server is unreachable, the token
@@ -391,14 +379,14 @@ async def async_extra_tools(proxy, read_only: bool = True) -> list[llm.Tool]:
         # which reads like "the assistant got dumber", not like a broken config.
         LOGGER.warning(
             "MCP proxy: %s is configured but returned no tools — query_ha is "
-            "NOT available to the model this turn", proxy._url
+            "NOT available to the model this turn", url
         )
         return []
-    return [QueryHATool(proxy, read_only=read_only)]
+    return [QueryHATool(proxy, read_only=data.get(CONF_MCP_READ_ONLY, True))]
 
 
-def options_schema(opts: dict) -> dict[Any, Any]:
-    """Voluptuous fragment merged into the options form.
+def subentry_schema(data: dict) -> dict[Any, Any]:
+    """Voluptuous fields for the MCP subentry form.
 
     suggested_value, NOT default: clearing a text field makes the frontend omit
     the key, and a `default` would then put the old value straight back - which
@@ -406,24 +394,24 @@ def options_schema(opts: dict) -> dict[Any, Any]:
     """
     return {
         vol.Optional(
-            CONF_MCP_URL, description={"suggested_value": opts.get(CONF_MCP_URL, "")}
+            CONF_MCP_URL, description={"suggested_value": data.get(CONF_MCP_URL, "")}
         ): str,
         vol.Optional(
             CONF_MCP_TOKEN,
-            description={"suggested_value": opts.get(CONF_MCP_TOKEN, "")},
+            description={"suggested_value": data.get(CONF_MCP_TOKEN, "")},
         ): str,
         vol.Required(
-            CONF_MCP_READ_ONLY, default=opts.get(CONF_MCP_READ_ONLY, True)
+            CONF_MCP_READ_ONLY, default=data.get(CONF_MCP_READ_ONLY, True)
         ): bool,
     }
 
 
-async def async_validate_options(hass, user_input: dict) -> str | None:
-    """Validate the MCP fields of the options form. Error string, or None if OK."""
-    url = user_input.get(CONF_MCP_URL, "").strip()
+async def async_validate(hass, data: dict) -> str | None:
+    """Validate the MCP subentry fields. Error string, or None if OK."""
+    url = (data.get(CONF_MCP_URL) or "").strip()
     if not url:
         return None
-    token = user_input.get(CONF_MCP_TOKEN, "").strip()
+    token = (data.get(CONF_MCP_TOKEN) or "").strip()
 
     from homeassistant.helpers.aiohttp_client import async_get_clientsession
 

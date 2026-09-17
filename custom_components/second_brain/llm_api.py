@@ -7,12 +7,10 @@ from .const import DOMAIN, LOGGER
 
 
 class BrainAPI(llm.API):
-    def __init__(self, hass, store, proxy=None, mcp_read_only=True, emby=None) -> None:
+    def __init__(self, hass, store, entry) -> None:
         super().__init__(hass=hass, id=DOMAIN, name="Second Brain")
         self._store = store
-        self._proxy = proxy
-        self._mcp_read_only = mcp_read_only
-        self._emby = emby
+        self._entry = entry
 
     async def async_get_api_instance(
         self, llm_context: llm.LLMContext
@@ -25,37 +23,17 @@ class BrainAPI(llm.API):
             UpdateMemoryTool(self._store),
             ForgetTool(self._store),
         ]
-        # --- HA data seam (optional feature; see docs/HA_DATA.md to remove) ---
-        # Guarded for the same reason as the MCP seam below: a broken optional
-        # feature must never cost the user their brain tools.
+        # Every optional feature is a subentry; the registry builds each one's
+        # tools and guards them individually, so a broken or unreachable feature
+        # never costs the user their core brain tools.
         try:
-            from .ha_data import async_extra_tools as ha_data_tools
+            from .features import async_feature_tools
 
-            tools += ha_data_tools(self.hass, self._store.async_record_failure)
+            tools += await async_feature_tools(
+                self.hass, self._entry, self._store.async_record_failure
+            )
         except Exception:
-            LOGGER.exception("HA data tools unavailable — continuing without them")
-        # --- end HA data seam ---
-        # --- Emby seam (optional feature; see docs/EMBY.md to remove) ---
-        # Guarded like the other seams: a broken or unconfigured Emby feature
-        # must never cost the user their brain tools.
-        try:
-            from .emby import async_extra_tools as emby_tools
-
-            tools += emby_tools(self._emby, self._store.async_record_failure)
-        except Exception:
-            LOGGER.exception("Emby tools unavailable — continuing without them")
-        # --- end Emby seam ---
-        # --- MCP proxy seam (optional feature; see docs/MCP.md to remove) ---
-        # Guarded: the proxy is optional, so nothing it does may cost the user
-        # their brain tools. A missing module (partial deploy) or an unreachable
-        # MCP server degrades to "no query_ha", never to "no Second Brain".
-        try:
-            from .mcp_proxy import async_extra_tools
-
-            tools += await async_extra_tools(self._proxy, self._mcp_read_only)
-        except Exception:
-            LOGGER.exception("MCP proxy unavailable — continuing without query_ha")
-        # --- end MCP proxy seam ---
+            LOGGER.exception("feature tools unavailable — continuing with core tools")
         return llm.APIInstance(
             api=self,
             api_prompt=prompt,

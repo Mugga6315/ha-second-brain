@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -17,6 +17,7 @@ async def test_nas_guard_raises_when_store_missing(hass, tmp_path):
         "initialized": True,
     }
     entry.options = {}
+    entry.subentries = {}
     entry.async_on_unload = MagicMock()
 
     with pytest.raises(ConfigEntryNotReady):
@@ -33,10 +34,13 @@ async def test_nas_guard_proceeds_on_first_setup(hass, tmp_path):
         "initialized": False,
     }
     entry.options = {}
+    entry.subentries = {}
     entry.async_on_unload = MagicMock()
+    hass.config_entries.async_forward_entry_setups = AsyncMock()
 
     with patch("custom_components.second_brain.llm.async_register_api", return_value=lambda: None):
         result = await async_setup_entry(hass, entry)
 
     assert result is True
-    hass.config_entries.async_update_entry.assert_called_once()
+    # First setup sets the initialized flag and seeds the recorder-tools feature.
+    hass.config_entries.async_update_entry.assert_called()

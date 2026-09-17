@@ -7,6 +7,14 @@ LOGGER = logging.getLogger(__package__)
 
 CONF_STORE_LOCATION = "store_location"
 
+# Subentry types — each optional feature is an add/removable subentry under the
+# one Second Brain entry. The parent holds only the store + prompt budgets; a
+# feature's config lives in its subentry's data. See docs/SUBENTRIES.md.
+SUBENTRY_HA_DATA = "ha_data"
+SUBENTRY_LIBRARIAN = "librarian"
+SUBENTRY_MCP = "mcp"
+SUBENTRY_EMBY = "emby"
+
 CONF_CORE_CHARS = "core_chars"
 CONF_RULES_CHARS = "rules_chars"
 CONF_INDEX_CHARS = "index_chars"

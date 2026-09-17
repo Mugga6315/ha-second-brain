@@ -201,64 +201,38 @@ async def test_query_ha_response_cap():
     assert "truncated" in result["result"]
 
 
-# --- seam resilience: an optional feature must never break the core ----------
+# --- seam: the feature builds query_ha from its subentry data ----------------
 
 
-async def test_broken_mcp_proxy_does_not_kill_brain_tools(hass, store):
-    """A partial deploy or dead MCP server must cost only query_ha.
+async def test_working_mcp_subentry_adds_query_ha(hass):
+    """A configured MCP subentry contributes exactly query_ha."""
+    from custom_components.second_brain import mcp_proxy
 
-    Regression: the seam used to be an unguarded import, so a missing
-    mcp_proxy.py made async_get_api_instance raise and Second Brain contributed
-    *nothing* — the model silently fell back to Assist-only.
-    """
-    from custom_components.second_brain.llm_api import BrainAPI
-
-    await store.async_setup()
-    api = BrainAPI(hass, store, proxy=FakeProxy(_HA_TOOLS))
-
-    with patch(
-        "custom_components.second_brain.mcp_proxy.async_extra_tools",
-        side_effect=ModuleNotFoundError("no mcp_proxy"),
-    ):
-        instance = await api.async_get_api_instance(llm_context=None)
-
-    assert [t.name for t in instance.tools][:5] == [
-        "search_brain",
-        "read_note",
-        "add_memory",
-        "update_memory",
-        "forget",
-    ]
-    assert "query_ha" not in [t.name for t in instance.tools]
+    with patch.object(mcp_proxy, "MCPProxy", return_value=FakeProxy(_HA_TOOLS)):
+        tools = await mcp_proxy.async_extra_tools(
+            hass, {"mcp_url": "http://x/api/mcp", "mcp_read_only": True}
+        )
+    assert [t.name for t in tools] == ["query_ha"]
 
 
-async def test_working_mcp_proxy_adds_query_ha(hass, store):
-    """Counterpart: when the proxy works, query_ha is present."""
-    from custom_components.second_brain.llm_api import BrainAPI
-
-    await store.async_setup()
-    api = BrainAPI(hass, store, proxy=FakeProxy(_HA_TOOLS))
-    instance = await api.async_get_api_instance(llm_context=None)
-    assert "query_ha" in [t.name for t in instance.tools]
-
-
-async def test_configured_but_no_tools_warns(caplog):
+async def test_configured_but_no_tools_warns(hass, caplog):
     """Silent degradation is the bug: a dead server must leave a loud log line."""
-    from custom_components.second_brain.mcp_proxy import async_extra_tools
+    from custom_components.second_brain import mcp_proxy
 
-    proxy = FakeProxy([])  # reachable object, but server returned zero tools
-    proxy._url = "http://dead.example/api/mcp"
-    tools = await async_extra_tools(proxy)
+    with patch.object(mcp_proxy, "MCPProxy", return_value=FakeProxy([])):
+        tools = await mcp_proxy.async_extra_tools(
+            hass, {"mcp_url": "http://dead.example/api/mcp"}
+        )
     assert tools == []
     assert "returned no tools" in caplog.text
     assert "dead.example" in caplog.text
 
 
-async def test_unconfigured_proxy_is_silent(caplog):
+async def test_unconfigured_subentry_is_silent(hass, caplog):
     """No mcp_url = feature off on purpose. Must NOT warn."""
     from custom_components.second_brain.mcp_proxy import async_extra_tools
 
-    assert await async_extra_tools(None) == []
+    assert await async_extra_tools(hass, {}) == []
     assert "returned no tools" not in caplog.text
 
 
@@ -547,7 +521,7 @@ async def test_delta_survives_response_truncation():
     assert "computed delta (last.sum - first.sum): 1999.0" in result["result"]
 
 
-def test_options_schema_allows_clearing_the_url():
+def test_subentry_schema_allows_clearing_the_url():
     """Regression: an mcp_url could not be removed once saved.
 
     Clearing a text field makes the HA frontend omit the key. With
@@ -555,35 +529,11 @@ def test_options_schema_allows_clearing_the_url():
     straight back, so submitting an empty field silently kept the proxy alive.
     """
     import voluptuous as vol
-    from custom_components.second_brain.mcp_proxy import CONF_MCP_URL, options_schema
+    from custom_components.second_brain.mcp_proxy import CONF_MCP_URL, subentry_schema
 
     saved = {CONF_MCP_URL: "http://localhost:8123/api/mcp", "mcp_read_only": True}
-    schema = vol.Schema(options_schema(saved))
+    schema = vol.Schema(subentry_schema(saved))
 
     assert schema({}).get(CONF_MCP_URL, "") == ""
     assert schema({CONF_MCP_URL: ""}).get(CONF_MCP_URL, "") == ""
     assert schema({CONF_MCP_URL: "http://other/mcp"})[CONF_MCP_URL] == "http://other/mcp"
-
-
-async def test_broken_mcp_validation_does_not_kill_the_options_form(hass):
-    """C-A9: the config-flow seam was the one left unguarded.
-
-    docs/MCP.md promises a missing module costs you query_ha and nothing else.
-    Here it took the whole options form with it.
-    """
-    from unittest.mock import MagicMock, patch
-
-    from custom_components.second_brain.config_flow import SecondBrainOptionsFlow
-
-    flow = SecondBrainOptionsFlow()
-    flow.hass = hass
-    entry = MagicMock()
-    entry.options = {}
-    flow._config_entry = entry
-    with patch.object(type(flow), "config_entry", property(lambda self: entry)), patch(
-        "custom_components.second_brain.mcp_proxy.async_validate_options",
-        side_effect=ImportError("mcp_proxy.py missing from a partial deploy"),
-    ):
-        result = await flow.async_step_init({"llm_base_url": "", "llm_api_key": ""})
-
-    assert result["type"] != "form" or result.get("errors") in (None, {})

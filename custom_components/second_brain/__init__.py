@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigSubentry
+from homeassistant.const import Platform
 from homeassistant.core import SupportsResponse
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import llm
+
+PLATFORMS = [Platform.BINARY_SENSOR]
 
 from .const import (
     CONF_CONSOLIDATE_ENABLED,
     CONF_CONSOLIDATE_TIME,
     CONF_CORE_CHARS,
     CONF_INDEX_CHARS,
-    CONF_LLM_API_KEY,
     CONF_LLM_BASE_URL,
     CONF_LLM_MODEL,
     CONF_NOTE_CHARS,
@@ -23,6 +25,10 @@ from .const import (
     LOGGER,
     NOTE_CHARS,
     RULES_CHARS,
+    SUBENTRY_EMBY,
+    SUBENTRY_HA_DATA,
+    SUBENTRY_LIBRARIAN,
+    SUBENTRY_MCP,
 )
 from .llm_api import BrainAPI
 from .store import Store
@@ -58,30 +64,37 @@ async def async_setup_entry(hass, entry: ConfigEntry) -> bool:
             entry, data={**entry.data, "initialized": True}
         )
 
-    # --- MCP proxy seam (optional feature; see docs/MCP.md to remove) ---
-    # Guarded: a broken/absent optional feature must not stop the integration
-    # from loading. Worst case the store still works without query_ha.
-    proxy, mcp_read_only = None, True
-    try:
-        from .mcp_proxy import build_proxy, read_only_from_entry
+    # Fresh install: seed the recorder-tools feature so a new brain ships with
+    # tools on, as it did before features were subentries. Existing installs get
+    # theirs from async_migrate_entry instead; the flag stops a re-seed after the
+    # user removes it. The extra existence check makes it safe if the flag write
+    # failed after the add last time — it won't add a second ha_data subentry.
+    if not entry.data.get("features_seeded"):
+        has_ha_data = any(
+            s.subentry_type == SUBENTRY_HA_DATA for s in entry.subentries.values()
+        )
+        if not has_ha_data:
+            hass.config_entries.async_add_subentry(
+                entry,
+                ConfigSubentry(
+                    data={},
+                    subentry_type=SUBENTRY_HA_DATA,
+                    title="HA data (statistics, history, calendar)",
+                    unique_id=None,
+                ),
+            )
+        hass.config_entries.async_update_entry(
+            entry, data={**entry.data, "features_seeded": True}
+        )
 
-        proxy, mcp_read_only = build_proxy(hass, entry), read_only_from_entry(entry)
-    except Exception:
-        LOGGER.exception("MCP proxy unavailable — loading without query_ha")
-    # --- end MCP proxy seam ---
-    # --- Emby seam (optional feature; see docs/EMBY.md to remove) ---
-    # Guarded: an absent module or bad Emby config must not stop the integration
-    # loading. Worst case the store still works without the Emby tools.
-    emby = None
-    try:
-        from .emby import build_client
-
-        emby = build_client(hass, entry)
-    except Exception:
-        LOGGER.exception("Emby unavailable — loading without Emby tools")
-    # --- end Emby seam ---
-    api = BrainAPI(hass, store, proxy=proxy, mcp_read_only=mcp_read_only, emby=emby)
+    # Optional features are subentries; BrainAPI reads them at call time and
+    # builds each feature's tools through the registry (features.py). Adding or
+    # removing a subentry fires the update listener below, which reloads and
+    # rebuilds the tool set.
+    api = BrainAPI(hass, store, entry)
     entry.async_on_unload(llm.async_register_api(hass, api))
+
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     await _setup_consolidator(hass, entry, store)
 
@@ -154,20 +167,31 @@ async def _async_reload(hass, entry: ConfigEntry) -> None:
     await hass.config_entries.async_reload(entry.entry_id)
 
 
+def _librarian_subentry(entry: ConfigEntry):
+    """The librarian subentry, or None when the feature is not added."""
+    for subentry in entry.subentries.values():
+        if subentry.subentry_type == SUBENTRY_LIBRARIAN:
+            return subentry
+    return None
+
+
 async def _setup_consolidator(hass, entry: ConfigEntry, store: Store) -> None:
-    opts = entry.options
-    base_url = opts.get(CONF_LLM_BASE_URL, "")
-    model = opts.get(CONF_LLM_MODEL, "")
-    if not base_url or not model:
+    # Librarian is a subentry now: absent means fully off — no service, no
+    # schedule (same as leaving the LLM fields empty did before).
+    subentry = _librarian_subentry(entry)
+    if subentry is None:
         return
+
+    from .llm_config import resolve_llm
+
+    base_url, api_key, model = resolve_llm(entry, dict(subentry.data))
+    if not base_url or not model:
+        return  # librarian added but the global LLM is not configured yet
 
     from .consolidator import Consolidator
 
     consolidator = Consolidator(
-        hass, store,
-        base_url=base_url,
-        api_key=opts.get(CONF_LLM_API_KEY, ""),
-        model=model,
+        hass, store, base_url=base_url, api_key=api_key, model=model
     )
 
     async def _consolidate_service(call):
@@ -182,10 +206,10 @@ async def _setup_consolidator(hass, entry: ConfigEntry, store: Store) -> None:
         supports_response=SupportsResponse.OPTIONAL,
     )
 
-    if not opts.get(CONF_CONSOLIDATE_ENABLED, True):
+    if not subentry.data.get(CONF_CONSOLIDATE_ENABLED, True):
         return
 
-    hour = opts.get(CONF_CONSOLIDATE_TIME, DEFAULT_CONSOLIDATE_TIME)
+    hour = subentry.data.get(CONF_CONSOLIDATE_TIME, DEFAULT_CONSOLIDATE_TIME)
     parts = hour.split(":")
     hh = int(parts[0])
     mm = int(parts[1]) if len(parts) > 1 else 0
@@ -199,4 +223,92 @@ async def _setup_consolidator(hass, entry: ConfigEntry, store: Store) -> None:
 
 
 async def async_unload_entry(hass, entry: ConfigEntry) -> bool:
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+
+async def async_remove_config_entry_device(hass, entry: ConfigEntry, device) -> bool:
+    """Allow deleting a feature device once its subentry is gone.
+
+    Feature devices are keyed by subentry id. A device whose id is not a current
+    subentry is stale — a removed feature, or a leftover — so it may be deleted.
+    A device for a live subentry must stay.
+    """
+    subs = set(entry.subentries)
+    return not any(
+        idf[0] == DOMAIN and idf[1] in subs for idf in device.identifiers
+    )
+
+
+async def async_migrate_entry(hass, entry: ConfigEntry) -> bool:
+    """Move per-feature config out of the parent options into subentries.
+
+    Before minor_version 2 every optional feature was configured by fields in
+    the one options form. Now each is a subentry. This reads the old fields and
+    creates the matching subentries, preserving exactly what was on: HA-data was
+    always on, the librarian ran when the global LLM was set, and MCP/Emby ran
+    when their URL was set. The global LLM, store and prompt budgets stay on the
+    parent, so those options are kept.
+    """
+    if entry.minor_version >= 2:
+        return True
+
+    from .emby import CONF_EMBY_API_KEY, CONF_EMBY_URL
+    from .mcp_proxy import CONF_MCP_READ_ONLY, CONF_MCP_TOKEN, CONF_MCP_URL
+
+    opts = dict(entry.options)
+
+    def _add(subentry_type: str, title: str, data: dict) -> None:
+        hass.config_entries.async_add_subentry(
+            entry,
+            ConfigSubentry(
+                data=data, subentry_type=subentry_type, title=title, unique_id=None
+            ),
+        )
+
+    _add(SUBENTRY_HA_DATA, "HA data (statistics, history, calendar)", {})
+    if opts.get(CONF_LLM_BASE_URL) and opts.get(CONF_LLM_MODEL):
+        _add(
+            SUBENTRY_LIBRARIAN,
+            "Librarian (nightly consolidation)",
+            {
+                CONF_CONSOLIDATE_ENABLED: opts.get(CONF_CONSOLIDATE_ENABLED, True),
+                CONF_CONSOLIDATE_TIME: opts.get(
+                    CONF_CONSOLIDATE_TIME, DEFAULT_CONSOLIDATE_TIME
+                ),
+            },
+        )
+    if (opts.get(CONF_MCP_URL) or "").strip():
+        _add(
+            SUBENTRY_MCP,
+            "MCP tool proxy",
+            {
+                k: opts[k]
+                for k in (CONF_MCP_URL, CONF_MCP_TOKEN, CONF_MCP_READ_ONLY)
+                if k in opts
+            },
+        )
+    if (opts.get(CONF_EMBY_URL) or "").strip():
+        _add(
+            SUBENTRY_EMBY,
+            "Emby media",
+            {k: opts[k] for k in (CONF_EMBY_URL, CONF_EMBY_API_KEY) if k in opts},
+        )
+
+    for key in (
+        CONF_MCP_URL,
+        CONF_MCP_TOKEN,
+        CONF_MCP_READ_ONLY,
+        CONF_EMBY_URL,
+        CONF_EMBY_API_KEY,
+        CONF_CONSOLIDATE_ENABLED,
+        CONF_CONSOLIDATE_TIME,
+    ):
+        opts.pop(key, None)
+
+    hass.config_entries.async_update_entry(
+        entry,
+        options=opts,
+        data={**entry.data, "features_seeded": True},
+        minor_version=2,
+    )
     return True

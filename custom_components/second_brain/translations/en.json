@@ -3,26 +3,19 @@
     "step": {
       "user": {
         "title": "Second Brain",
-        "description": "Persistent markdown knowledge store for your voice assistant. The chosen folder is used directly as the store - markdown files are created inside it. Leave LLM fields empty to disable the consolidator; everything here can be changed later under Configure.",
+        "description": "Persistent markdown knowledge store for your voice assistant. The chosen folder is used directly as the store - markdown files are created inside it. The LLM fields are the global model features use (e.g. the librarian); leave them empty if no feature needs one. Everything else - the librarian, MCP, Emby and the recorder tools - is added afterwards under Configure as separate features you can add or remove.",
         "data": {
           "store_location": "Store location",
           "core_chars": "Max chars of CORE.md in prompt",
           "rules_chars": "Max chars of rules in prompt",
           "index_chars": "Max chars of INDEX.md in prompt",
           "note_chars": "Max chars when reading a note",
-          "llm_base_url": "LLM base URL for consolidation (e.g. http://localhost:11434/v1)",
-          "llm_api_key": "LLM API key (optional, leave empty for local servers)",
-          "mcp_url": "MCP server URL for HA tool proxy (e.g. http://localhost:8123/api/mcp)",
-          "mcp_token": "MCP server bearer token (HA long-lived access token)",
-          "mcp_read_only": "MCP read-only (hide write/control tools from the model)",
-          "emby_url": "Emby server URL for library search and playback (e.g. http://localhost:8096)",
-          "emby_api_key": "Emby API key (Emby dashboard > API Keys)",
-          "consolidate_enabled": "Enable nightly consolidation",
-          "consolidate_time": "Time to run nightly consolidation"
+          "llm_base_url": "Global LLM base URL (e.g. http://localhost:11434/v1)",
+          "llm_api_key": "Global LLM API key (optional, leave empty for local servers)"
         }
       },
       "model": {
-        "title": "Select consolidation model",
+        "title": "Select model",
         "description": "Available models from {url}. You can also type a custom model name.",
         "data": {
           "llm_model": "Model"
@@ -34,9 +27,7 @@
       }
     },
     "error": {
-      "llm_unreachable": "LLM endpoint validation failed: {error}",
-      "mcp_unreachable": "MCP server validation failed: {error}",
-      "emby_unreachable": "Emby server validation failed: {error}"
+      "llm_unreachable": "LLM endpoint validation failed: {error}"
     },
     "abort": {
       "already_configured": "Second Brain is already configured. Only one instance is supported."
@@ -46,26 +37,19 @@
     "step": {
       "init": {
         "title": "Second Brain options",
-        "description": "Adjust prompt budgets, store location, and consolidation settings. The chosen folder is used directly as the store root. Existing files are not moved when the location changes. Leave LLM fields empty to disable the consolidator.",
+        "description": "Adjust the store location, prompt budgets and the global LLM. Features (librarian, MCP, Emby, recorder tools) are added and removed as separate entries, not here.",
         "data": {
           "store_location": "Store location",
           "core_chars": "Max chars of CORE.md in prompt",
           "rules_chars": "Max chars of rules in prompt",
           "index_chars": "Max chars of INDEX.md in prompt",
           "note_chars": "Max chars when reading a note",
-          "llm_base_url": "LLM base URL for consolidation (e.g. http://localhost:11434/v1)",
-          "llm_api_key": "LLM API key (optional, leave empty for local servers)",
-          "mcp_url": "MCP server URL for HA tool proxy (e.g. http://localhost:8123/api/mcp)",
-          "mcp_token": "MCP server bearer token (HA long-lived access token)",
-          "mcp_read_only": "MCP read-only (hide write/control tools from the model)",
-          "emby_url": "Emby server URL for library search and playback (e.g. http://localhost:8096)",
-          "emby_api_key": "Emby API key (Emby dashboard > API Keys)",
-          "consolidate_enabled": "Enable nightly consolidation",
-          "consolidate_time": "Time to run nightly consolidation"
+          "llm_base_url": "Global LLM base URL (e.g. http://localhost:11434/v1)",
+          "llm_api_key": "Global LLM API key (optional, leave empty for local servers)"
         }
       },
       "model": {
-        "title": "Select consolidation model",
+        "title": "Select model",
         "description": "Available models from {url}. You can also type a custom model name.",
         "data": {
           "llm_model": "Model"
@@ -77,9 +61,125 @@
       }
     },
     "error": {
-      "llm_unreachable": "LLM endpoint validation failed: {error}",
-      "mcp_unreachable": "MCP server validation failed: {error}",
-      "emby_unreachable": "Emby server validation failed: {error}"
+      "llm_unreachable": "LLM endpoint validation failed: {error}"
+    }
+  },
+  "config_subentries": {
+    "ha_data": {
+      "entry_type": "HA data",
+      "initiate_flow": {
+        "user": "Add HA data tools",
+        "reconfigure": "Reconfigure HA data tools"
+      },
+      "step": {
+        "user": {
+          "title": "HA data (statistics, history, calendar)",
+          "description": "Adds get_statistics, get_history and get_calendar_events, which read Home Assistant's own recorder. No settings - adding this turns the tools on, removing it turns them off."
+        },
+        "reconfigure": {
+          "title": "HA data (statistics, history, calendar)",
+          "description": "No settings - remove this feature to turn the recorder tools off."
+        }
+      },
+      "abort": {
+        "reconfigure_successful": "Re-configuration was successful",
+        "already_configured": "This feature is already added. Remove or reconfigure the existing one."
+      }
+    },
+    "librarian": {
+      "entry_type": "Librarian",
+      "initiate_flow": {
+        "user": "Add the librarian",
+        "reconfigure": "Reconfigure the librarian"
+      },
+      "step": {
+        "user": {
+          "title": "Librarian (nightly consolidation)",
+          "description": "Nightly consolidation of memories into the wiki. Uses the global LLM configured on Second Brain.",
+          "data": {
+            "consolidate_enabled": "Enable nightly consolidation",
+            "consolidate_time": "Time to run nightly consolidation"
+          }
+        },
+        "reconfigure": {
+          "title": "Librarian (nightly consolidation)",
+          "description": "Uses the global LLM configured on Second Brain.",
+          "data": {
+            "consolidate_enabled": "Enable nightly consolidation",
+            "consolidate_time": "Time to run nightly consolidation"
+          }
+        }
+      },
+      "abort": {
+        "reconfigure_successful": "Re-configuration was successful",
+        "already_configured": "This feature is already added. Remove or reconfigure the existing one."
+      }
+    },
+    "mcp": {
+      "entry_type": "MCP tool proxy",
+      "initiate_flow": {
+        "user": "Add the MCP tool proxy",
+        "reconfigure": "Reconfigure the MCP tool proxy"
+      },
+      "step": {
+        "user": {
+          "title": "MCP tool proxy",
+          "description": "Exposes an MCP server's tools to the model as query_ha.",
+          "data": {
+            "mcp_url": "MCP server URL (e.g. http://localhost:8123/api/mcp)",
+            "mcp_token": "MCP server bearer token (HA long-lived access token)",
+            "mcp_read_only": "Read-only (hide write/control tools from the model)"
+          }
+        },
+        "reconfigure": {
+          "title": "MCP tool proxy",
+          "description": "Exposes an MCP server's tools to the model as query_ha.",
+          "data": {
+            "mcp_url": "MCP server URL (e.g. http://localhost:8123/api/mcp)",
+            "mcp_token": "MCP server bearer token (HA long-lived access token)",
+            "mcp_read_only": "Read-only (hide write/control tools from the model)"
+          }
+        }
+      },
+      "error": {
+        "cannot_connect": "MCP server validation failed: {error}"
+      },
+      "abort": {
+        "reconfigure_successful": "Re-configuration was successful",
+        "already_configured": "This feature is already added. Remove or reconfigure the existing one."
+      }
+    },
+    "emby": {
+      "entry_type": "Emby",
+      "initiate_flow": {
+        "user": "Add Emby",
+        "reconfigure": "Reconfigure Emby"
+      },
+      "step": {
+        "user": {
+          "title": "Emby media",
+          "description": "Lets the assistant search your Emby library and start playback on a player.",
+          "data": {
+            "emby_url": "Emby server URL (e.g. http://localhost:8096)",
+            "emby_api_key": "Emby API key (Emby dashboard > API Keys)"
+          }
+        },
+        "reconfigure": {
+          "title": "Emby media",
+          "description": "Lets the assistant search your Emby library and start playback on a player.",
+          "data": {
+            "emby_url": "Emby server URL (e.g. http://localhost:8096)",
+            "emby_api_key": "Emby API key (Emby dashboard > API Keys)"
+          }
+        }
+      },
+      "error": {
+        "cannot_connect": "Emby server validation failed: {error}"
+      },
+      "abort": {
+        "reconfigure_successful": "Re-configuration was successful",
+        "already_configured": "This feature is already added. Remove or reconfigure the existing one."
+      }
     }
   },
   "issues": {

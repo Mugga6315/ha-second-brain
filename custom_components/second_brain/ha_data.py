@@ -644,8 +644,13 @@ def _history(hass, start, end, entity_id: str) -> list:
 # --- seam: the only entry point the core files call ---------------------------
 
 
-def async_extra_tools(hass, record_failure=None) -> list[llm.Tool]:
-    """Tools this feature contributes to BrainAPI."""
+async def async_extra_tools(hass, data: dict, record_failure=None) -> list[llm.Tool]:
+    """Tools this feature contributes when its subentry is present.
+
+    The subentry carries no config — adding it turns the recorder tools on,
+    removing it turns them off — so `data` is accepted for interface uniformity
+    and unused.
+    """
     try:
         from homeassistant.components import recorder  # noqa: F401
     except ImportError:
@@ -656,3 +661,13 @@ def async_extra_tools(hass, record_failure=None) -> list[llm.Tool]:
         GetHistoryTool(hass, record_failure),
         GetCalendarEventsTool(hass, record_failure),
     ]
+
+
+def subentry_schema(data: dict) -> dict:
+    """No configurable fields — presence of the subentry is the on switch."""
+    return {}
+
+
+async def async_validate(hass, data: dict) -> str | None:
+    """Nothing to validate — the recorder is either present or it is not."""
+    return None

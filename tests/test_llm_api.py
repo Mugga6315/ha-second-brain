@@ -1,14 +1,23 @@
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 from homeassistant.helpers import llm
 
 from custom_components.second_brain.llm_api import BrainAPI
 
 
+def _entry():
+    """A parent entry with no feature subentries — only the core tools load."""
+    entry = MagicMock()
+    entry.subentries = {}
+    return entry
+
+
 async def test_api_instance_has_prompt_and_tools(hass, store):
     await store.async_setup()
     (store._root / "CORE.md").write_text("# Custom Core\n")
-    api = BrainAPI(hass, store)
+    api = BrainAPI(hass, store, _entry())
     instance = await api.async_get_api_instance(llm_context=None)
     assert "Custom Core" in instance.api_prompt
     assert "search_brain" in instance.api_prompt
@@ -28,7 +37,7 @@ def _tool(instance, name):
 async def test_search_brain_tool(hass, store):
     await store.async_setup()
     await store.async_add_memory("boiler service due in October", topic="boiler")
-    instance = await BrainAPI(hass, store).async_get_api_instance(llm_context=None)
+    instance = await BrainAPI(hass, store, _entry()).async_get_api_instance(llm_context=None)
     result = await _tool(instance, "search_brain").async_call(
         hass,
         llm.ToolInput(id="1", tool_name="search_brain", tool_args={"query": "boiler"}),
@@ -41,7 +50,7 @@ async def test_search_brain_tool(hass, store):
 async def test_read_note_tool(hass, store):
     await store.async_setup()
     await store.async_add_memory("hello world", topic="greeting")
-    instance = await BrainAPI(hass, store).async_get_api_instance(llm_context=None)
+    instance = await BrainAPI(hass, store, _entry()).async_get_api_instance(llm_context=None)
     result = await _tool(instance, "read_note").async_call(
         hass,
         llm.ToolInput(id="1", tool_name="read_note", tool_args={"path": "memories/greeting.md"}),
@@ -55,7 +64,7 @@ async def test_read_note_tool_rejects_traversal(hass, store, tmp_path):
     await store.async_setup()
     secret = tmp_path.parent.parent / "secrets.yaml"
     secret.write_text("password: hunter2")
-    instance = await BrainAPI(hass, store).async_get_api_instance(llm_context=None)
+    instance = await BrainAPI(hass, store, _entry()).async_get_api_instance(llm_context=None)
     result = await _tool(instance, "read_note").async_call(
         hass,
         llm.ToolInput(id="1", tool_name="read_note", tool_args={"path": "../../secrets.yaml"}),
@@ -68,7 +77,7 @@ async def test_read_note_tool_rejects_traversal(hass, store, tmp_path):
 
 async def test_remember_tool(hass, store):
     await store.async_setup()
-    instance = await BrainAPI(hass, store).async_get_api_instance(llm_context=None)
+    instance = await BrainAPI(hass, store, _entry()).async_get_api_instance(llm_context=None)
     result = await _tool(instance, "add_memory").async_call(
         hass,
         llm.ToolInput(
@@ -83,7 +92,7 @@ async def test_remember_tool(hass, store):
 
 async def test_remember_tool_no_topic(hass, store):
     await store.async_setup()
-    instance = await BrainAPI(hass, store).async_get_api_instance(llm_context=None)
+    instance = await BrainAPI(hass, store, _entry()).async_get_api_instance(llm_context=None)
     result = await _tool(instance, "add_memory").async_call(
         hass,
         llm.ToolInput(id="1", tool_name="add_memory", tool_args={"text": "quick thought"}),
@@ -97,7 +106,7 @@ async def test_remember_tool_no_topic(hass, store):
 async def test_search_brain_empty_lists_notes(hass, store):
     await store.async_setup()
     await store.async_add_memory("boiler service due in October", topic="boiler")
-    instance = await BrainAPI(hass, store).async_get_api_instance(llm_context=None)
+    instance = await BrainAPI(hass, store, _entry()).async_get_api_instance(llm_context=None)
     result = await _tool(instance, "search_brain").async_call(
         hass,
         llm.ToolInput(id="1", tool_name="search_brain", tool_args={"query": "nonexistent"}),
