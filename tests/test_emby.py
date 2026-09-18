@@ -10,6 +10,7 @@ from homeassistant.helpers import llm
 from custom_components.second_brain.emby import (
     FULL_LIMIT,
     SEARCH_LIMIT,
+    WAKE_DEFAULT_APP,
     CountEmbyTool,
     PlayEmbyTool,
     NextUpEmbyTool,
@@ -17,17 +18,19 @@ from custom_components.second_brain.emby import (
     RecentEmbyTool,
     SearchEmbyTool,
     _controllable,
+    _filter_candidates,
     _format_items,
     _item_title,
     _match_session,
+    _match_wake_entity,
     _playstate,
     _scope,
 )
 
 
-def _call(tool, **args):
+def _call(tool, hass=None, **args):
     return tool.async_call(
-        None, llm.ToolInput(id="1", tool_name=tool.name, tool_args=args), None
+        hass, llm.ToolInput(id="1", tool_name=tool.name, tool_args=args), None
     )
 
 
@@ -251,3 +254,233 @@ async def test_next_up_empty_names_the_series():
     tool = NextUpEmbyTool(_FakeClient(next_up=[]))
     result = await _call(tool, series="Dark")
     assert "No next-up episodes for 'Dark'" in result["result"]
+
+
+class _FakeHass:
+    """Records service calls — stands in for hass in wake tests."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+        self.services = self
+
+    async def async_call(self, domain, service, data, blocking=False):
+        self.calls.append((domain, service, data, blocking))
+
+
+class _WakeClient:
+    """Sessions appear only after `connect_after` polls — simulates app start."""
+
+    def __init__(self, connect_after: int, session=None) -> None:
+        self._connect_after = connect_after
+        self._polls = 0
+        self._session = session or {
+            "Id": "s1", "DeviceName": "Shield", "Client": "Kodi",
+            "SupportsRemoteControl": True,
+        }
+        self.played: tuple[str, str] | None = None
+
+    async def async_sessions(self):
+        self._polls += 1
+        return [self._session] if self._polls >= self._connect_after else []
+
+    async def async_play(self, session_id, item_id):
+        self.played = (session_id, item_id)
+
+
+async def test_play_emby_reports_honest_failure_when_wake_never_connects(monkeypatch):
+    import custom_components.second_brain.emby as emby
+
+    monkeypatch.setattr(emby, "WAKE_POLL_S", 0)
+    monkeypatch.setattr(emby, "WAKE_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(
+        emby, "_wake_candidates",
+        lambda hass: {"media_player.shield": "Living Room Shield"},
+    )
+    hass = _FakeHass()
+    client = _WakeClient(connect_after=10**9)  # never connects
+    tool = PlayEmbyTool(client)
+    result = await _call(tool, hass=hass, item_id="m1", player="living room")
+    assert client.played is None
+    assert "never connected" in result["error"]
+
+
+async def test_play_emby_without_matching_entity_stays_offline(monkeypatch):
+    import custom_components.second_brain.emby as emby
+
+    monkeypatch.setattr(
+        emby, "_wake_candidates",
+        lambda hass: {"media_player.shield": "Living Room Shield"},
+    )
+    hass = _FakeHass()
+    client = _FakeClient(
+        sessions=[{"Id": "s1", "DeviceName": "Shield", "SupportsRemoteControl": True}]
+    )
+    tool = PlayEmbyTool(client)
+    result = await _call(tool, hass=hass, item_id="m1", player="kitchen")
+    assert hass.calls == []  # no wake attempted
+    assert client.played is None
+    assert "Shield" in result["error"]
+
+
+async def test_play_emby_no_androidtv_entities_behaves_as_before(monkeypatch):
+    import custom_components.second_brain.emby as emby
+
+    monkeypatch.setattr(emby, "_wake_candidates", lambda hass: {})
+    hass = _FakeHass()
+    client = _FakeClient(sessions=[])
+    tool = PlayEmbyTool(client)
+    result = await _call(tool, hass=hass, item_id="m1", player="kodi")
+    assert hass.calls == []
+    assert "none are connected right now" in result["error"]
+
+
+def test_match_wake_entity_unique_match_by_name_or_entity_id():
+    candidates = {"media_player.shield": "Living Room Shield"}
+    hit, ambiguous = _match_wake_entity(candidates, "play in the living room")
+    assert hit == "media_player.shield" and ambiguous == []
+    hit, ambiguous = _match_wake_entity(candidates, "living room")
+    assert hit == "media_player.shield" and ambiguous == []
+
+
+def test_match_wake_entity_ambiguity_is_a_question_not_a_guess():
+    candidates = {
+        "media_player.shield_living": "Living Room Shield",
+        "media_player.shield_garden": "Garden Shield",
+    }
+    hit, ambiguous = _match_wake_entity(candidates, "shield")
+    assert hit is None
+    assert sorted(ambiguous) == ["media_player.shield_garden", "media_player.shield_living"]
+
+
+def test_match_wake_entity_no_fit_or_empty_request():
+    candidates = {"media_player.shield": "Living Room Shield"}
+    assert _match_wake_entity(candidates, "bedroom") == (None, [])
+    assert _match_wake_entity(candidates, "") == (None, [])
+
+
+async def test_play_emby_auto_wakes_matching_androidtv_without_config(monkeypatch):
+    import custom_components.second_brain.emby as emby
+
+    monkeypatch.setattr(emby, "WAKE_POLL_S", 0)
+    monkeypatch.setattr(
+        emby, "_wake_candidates",
+        lambda hass: {"media_player.shield": "Living Room Shield"},
+    )
+    hass = _FakeHass()
+    client = _WakeClient(connect_after=3)
+    tool = PlayEmbyTool(client)  # no rules at all — pure auto-discovery
+    result = await _call(tool, hass=hass, item_id="m1", player="living room")
+    assert hass.calls == [
+        ("media_player", "select_source",
+         {"entity_id": "media_player.shield", "source": WAKE_DEFAULT_APP}, True),
+    ]
+    assert client.played == ("s1", "m1")
+    assert "Playing on" in result["result"]
+
+
+async def test_play_emby_auto_wake_asks_when_several_players_fit(monkeypatch):
+    import custom_components.second_brain.emby as emby
+
+    monkeypatch.setattr(
+        emby, "_wake_candidates",
+        lambda hass: {
+            "media_player.shield_living": "Living Room Shield",
+            "media_player.shield_garden": "Garden Shield",
+        },
+    )
+    hass = _FakeHass()
+    client = _FakeClient(sessions=[])
+    tool = PlayEmbyTool(client)
+    result = await _call(tool, hass=hass, item_id="m1", player="shield")
+    assert hass.calls == []  # never launches on a guess
+    assert "matches several Android TV players" in result["error"]
+    assert "Living Room Shield" in result["error"] and "Garden Shield" in result["error"]
+
+
+async def test_play_emby_auto_wake_stays_off_without_androidtv_entities(monkeypatch):
+    import custom_components.second_brain.emby as emby
+
+    monkeypatch.setattr(emby, "_wake_candidates", lambda hass: {})
+    hass = _FakeHass()
+    client = _FakeClient(sessions=[])
+    tool = PlayEmbyTool(client)
+    result = await _call(tool, hass=hass, item_id="m1", player="living room")
+    assert hass.calls == []
+    assert "none are connected right now" in result["error"]
+
+
+async def test_play_emby_errors_teach_the_androidtv_vocabulary(monkeypatch):
+    import custom_components.second_brain.emby as emby
+
+    monkeypatch.setattr(
+        emby, "_wake_candidates",
+        lambda hass: {"media_player.shield": "Living Room Shield"},
+    )
+    hass = _FakeHass()
+    client = _FakeClient(sessions=[])
+    tool = PlayEmbyTool(client)
+    result = await _call(tool, hass=hass, item_id="m1", player="receiver")
+    assert "name it by its device or room name" in result["error"]
+    assert "started automatically" in result["error"]
+
+
+def test_filter_candidates_configured_list_is_exclusive():
+    candidates = {
+        "media_player.shield": "Living Room Shield",
+        "media_player.shield_bedroom": "Bedroom Shield",
+    }
+    assert _filter_candidates(candidates, None) is candidates  # nothing set = all
+    picked = _filter_candidates(candidates, ["media_player.shield"])
+    assert picked == {"media_player.shield": "Living Room Shield"}
+    assert _filter_candidates(candidates, []) == {}
+
+
+async def test_play_emby_wake_entities_restrict_wake_to_picked_players(monkeypatch):
+    import custom_components.second_brain.emby as emby
+
+    monkeypatch.setattr(emby, "WAKE_POLL_S", 0)
+    monkeypatch.setattr(
+        emby, "_wake_candidates",
+        lambda hass: {
+            "media_player.shield": "Living Room Shield",
+            "media_player.shield_bedroom": "Bedroom Shield",
+        },
+    )
+    hass = _FakeHass()
+    client = _FakeClient(sessions=[])
+
+    # "bedroom" only wakes when Bedroom Shield is picked; unpicked -> no launch,
+    # but the hint stays: it steers the model toward a name that WILL work.
+    tool = PlayEmbyTool(client, wake_entities=["media_player.shield"])
+    result = await _call(tool, hass=hass, item_id="m1", player="bedroom")
+    assert hass.calls == []
+    assert "name it by its device or room name" in result["error"]
+
+    picked = PlayEmbyTool(_WakeClient(connect_after=3), wake_entities=["media_player.shield_bedroom"])
+    result = await _call(picked, hass=_FakeHass(), item_id="m1", player="bedroom")
+    assert "Playing on" in result["result"]
+
+
+async def test_play_emby_no_hint_when_picker_excludes_every_entity(monkeypatch):
+    import custom_components.second_brain.emby as emby
+
+    monkeypatch.setattr(
+        emby, "_wake_candidates",
+        lambda hass: {"media_player.shield": "Living Room Shield"},
+    )
+    hass = _FakeHass()
+    client = _FakeClient(sessions=[])
+    tool = PlayEmbyTool(client, wake_entities=["media_player.gone"])
+    result = await _call(tool, hass=hass, item_id="m1", player="living room")
+    assert hass.calls == []
+    assert "name it by its device or room name" not in result["error"]
+
+
+async def test_play_emby_errors_name_the_exception_type():
+    class _TimeoutClient:
+        async def async_search(self, *args):
+            raise TimeoutError()
+
+    tool = SearchEmbyTool(_TimeoutClient())
+    result = await _call(tool, query="blade")
+    assert "Cannot reach Emby: TimeoutError:" in result["error"]

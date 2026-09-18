@@ -19,13 +19,19 @@ key and search limit are the calibration knobs to tune against a real server.
 """
 from __future__ import annotations
 
+import asyncio
+import logging
+
 import aiohttp
 import voluptuous as vol
-from homeassistant.helpers import llm
+from homeassistant.helpers import llm, selector
 
 # --- options keys (surfaced by config_flow via options_schema) -----------------
 CONF_EMBY_URL = "emby_url"
 CONF_EMBY_API_KEY = "emby_api_key"
+CONF_WAKE_ENTITIES = "wake_entities"
+
+_LOGGER = logging.getLogger(__name__)
 
 # status -> Emby playstate filter. Playstate is per-user, resolved automatically.
 _STATUS_FILTER = {
@@ -50,6 +56,17 @@ FULL_LIMIT = 1000
 
 # Emby item type -> the API's IncludeItemTypes value.
 _TYPE_MAP = {"movie": "Movie", "series": "Series", "all": "Movie,Series"}
+
+# Wake polling: how long play_emby waits for a launched player to register its
+# Emby session, and the pause between polls. Real-world startup (Kodi + Emby
+# add-on) lands around 10s, so 15s gives a little margin without a long hang.
+WAKE_TIMEOUT_S = 15
+WAKE_POLL_S = 3
+
+# The Emby client play_emby assumes on Android TV: Kodi with the Emby add-on.
+# play_emby never plays through any other app — asking for "Netflix on the TV"
+# is a separate concern from starting library playback (decided 2026-09-18).
+WAKE_DEFAULT_APP = "org.xbmc.kodi"
 
 
 class EmbyClient:
@@ -299,6 +316,108 @@ def _match_session(sessions: list[dict], player: str) -> dict | None:
     return None
 
 
+async def _wake_and_wait(
+    hass, client: EmbyClient, entity_id: str, app: str
+) -> dict | None:
+    """Launch the player via the androidtv integration, then wait for its session.
+
+    The player's session is the one that *appears* after the launch — its name
+    (whatever the client reports) need not match the request wording. Existing
+    sessions are snapshotted first, and the first new controllable session
+    within WAKE_TIMEOUT_S wins; None after that is the honest failure the tool
+    reports.
+    """
+    try:
+        before = {s.get("Id") for s in _controllable(await client.async_sessions())}
+    except Exception:
+        before = set()
+    await hass.services.async_call(
+        "media_player",
+        "select_source",
+        {"entity_id": entity_id, "source": app},
+        blocking=True,
+    )
+    deadline = asyncio.get_event_loop().time() + WAKE_TIMEOUT_S
+    while asyncio.get_event_loop().time() < deadline:
+        await asyncio.sleep(WAKE_POLL_S)
+        try:
+            sessions = await client.async_sessions()
+        except Exception:
+            continue  # server hiccup mid-wait — keep polling until the deadline
+        fresh = [s for s in _controllable(sessions) if s.get("Id") not in before]
+        if fresh:
+            return fresh[0]
+    return None
+
+
+def _filter_candidates(
+    candidates: dict[str, str], allowed: list[str] | None
+) -> dict[str, str]:
+    """The candidate set the user's player picker allows.
+
+    Nothing configured = every androidtv player is a wake candidate (auto-
+    discovery). A configured list is exclusive: only those entities may be
+    launched, so an unconfigured device never gets an app started on it.
+    """
+    if allowed is None:
+        return candidates
+    return {eid: name for eid, name in candidates.items() if eid in allowed}
+
+
+def _wake_candidates(hass) -> dict[str, str]:
+    """The androidtv media players known to Home Assistant: {entity_id: name}.
+
+    One thin seam over the entity registry; everything matching happens on the
+    plain dict, so the logic is testable without a live hass. A lookup that
+    cannot run (no registry, tests) degrades to no candidates — auto-wake is
+    best-effort and the no-player error path must keep working without it.
+    """
+    if hass is None:  # tests call the tools without a hass
+        return {}
+    from homeassistant.helpers import entity_registry as er
+
+    try:
+        registry = er.async_get(hass)
+    except Exception:
+        return {}
+    candidates = {}
+    for entry in registry.entities.values():
+        if entry.domain != "media_player" or entry.platform != "androidtv":
+            continue
+        state = hass.states.get(entry.entity_id)
+        candidates[entry.entity_id] = (
+            state.attributes.get("friendly_name", "") if state else ""
+        )
+    return candidates
+
+
+def _match_wake_entity(
+    candidates: dict[str, str], player: str
+) -> tuple[str | None, list[str]]:
+    """The one androidtv player the request name fits, or which ones are ambiguous.
+
+    Matches on shared words between the request and the display name — "play
+    in the living room" fits "Living Room Shield" without either being a
+    substring of the other — and, as a fallback, the request as a whole inside
+    the entity_id with underscores read as spaces. Returns (None, hits) when
+    several fit — launching on a guess would start an app on the wrong TV, so
+    that stays a question, not a dice roll.
+    """
+    needle = player.strip().lower()
+    if not needle:
+        return None, []
+    request_words = set(needle.split())
+    hits = []
+    for entity_id, name in candidates.items():
+        if set(name.lower().split()) & request_words:
+            hits.append(entity_id)
+        elif needle in entity_id.replace("_", " "):
+            hits.append(entity_id)
+    if len(hits) == 1:
+        return hits[0], []
+    return None, hits
+
+
 # --- tools --------------------------------------------------------------------
 
 
@@ -308,8 +427,11 @@ class _EmbyTool(llm.Tool):
         self._record_failure = record_failure
 
     async def _fail(self, message: str, **context) -> dict:
+        # The HA log mirrors every tool failure — tool results vanish into the
+        # conversation, so this is where debugging actually happens.
+        detail = " ".join(f"{k}={v!r}" for k, v in context.items())
+        _LOGGER.warning("emby tool %s failed: %s %s", self.name, message, detail)
         if self._record_failure is not None:
-            detail = " ".join(f"{k}={v!r}" for k, v in context.items())
             await self._record_failure(self.name, f"{detail} -> {message}")
         return {"error": message}
 
@@ -339,7 +461,7 @@ class CountEmbyTool(_EmbyTool):
         try:
             count = await self._client.async_count(item_type, genre)
         except Exception as e:
-            return await self._fail(f"Cannot reach Emby: {e}", genre=genre)
+            return await self._fail(f"Cannot reach Emby: {type(e).__name__}: {e}", genre=genre)
         return {"result": f"{count} {_scope(item_type, genre)} in the Emby library."}
 
 
@@ -382,7 +504,7 @@ class SearchEmbyTool(_EmbyTool):
         except aiohttp.ClientResponseError as e:
             return await self._fail(f"Emby returned HTTP {e.status}", query=query, genre=genre)
         except Exception as e:
-            return await self._fail(f"Cannot reach Emby: {e}", query=query, genre=genre)
+            return await self._fail(f"Cannot reach Emby: {type(e).__name__}: {e}", query=query, genre=genre)
         scope = _scope(item_type, genre, query)
         if not items:
             return {"result": f"No {scope} in the Emby library."}
@@ -421,7 +543,7 @@ class RecentEmbyTool(_EmbyTool):
         except aiohttp.ClientResponseError as e:
             return await self._fail(f"Emby returned HTTP {e.status}", kind=kind)
         except Exception as e:
-            return await self._fail(str(e), kind=kind)
+            return await self._fail(f"{type(e).__name__}: {e}", kind=kind)
         if not items:
             labels = {"watching": "in progress", "played": "recently played", "added": "recently added"}
             return {"result": f"Nothing {labels[kind]} in Emby."}
@@ -443,7 +565,7 @@ class NowPlayingEmbyTool(_EmbyTool):
         try:
             sessions = await self._client.async_now_playing()
         except Exception as e:
-            return await self._fail(f"Cannot reach Emby: {e}")
+            return await self._fail(f"Cannot reach Emby: {type(e).__name__}: {e}")
         if not sessions:
             return {"result": "Nothing is playing on Emby right now."}
         lines = []
@@ -476,7 +598,7 @@ class NextUpEmbyTool(_EmbyTool):
         except aiohttp.ClientResponseError as e:
             return await self._fail(f"Emby returned HTTP {e.status}", series=series)
         except Exception as e:
-            return await self._fail(str(e), series=series)
+            return await self._fail(f"{type(e).__name__}: {e}", series=series)
         if not items:
             where = f" for '{series}'" if series else ""
             return {"result": f"No next-up episodes{where}."}
@@ -488,14 +610,21 @@ class PlayEmbyTool(_EmbyTool):
     description = (
         "Start playing an Emby item on a player. Pass item_id (from search_emby) "
         "and player — the name of the target player as shown in Emby (e.g. "
-        "'Living Room', 'Kodi', 'Shield'); a partial name is enough. The player "
-        "must be on and connected to Emby; an offline player cannot be woken from "
-        "here. On a name that matches no connected player, the reply lists the "
-        "players that are available right now."
+        "'Living Room', 'Kodi', 'Shield'); a partial name is enough. A player "
+        "that is not connected yet is started automatically: the Kodi app is "
+        "launched on the matching Android TV, so the first play may take a "
+        "moment. If the player still cannot be reached, the reply says so."
     )
     parameters = vol.Schema(
         {vol.Required("item_id"): str, vol.Required("player"): str}
     )
+
+    def __init__(
+        self, client: EmbyClient, record_failure=None,
+        wake_entities: list[str] | None = None,
+    ) -> None:
+        super().__init__(client, record_failure)
+        self._wake_entities = wake_entities  # None = auto (all androidtv players)
 
     async def async_call(
         self, hass, tool_input: llm.ToolInput, llm_context: llm.LLMContext
@@ -506,17 +635,46 @@ class PlayEmbyTool(_EmbyTool):
         try:
             sessions = await self._client.async_sessions()
         except Exception as e:
-            return await self._fail(f"Cannot reach Emby: {e}", player=player)
+            return await self._fail(f"Cannot reach Emby: {type(e).__name__}: {e}", player=player)
+
+        # The androidtv players this play may wake — one registry walk, reused
+        # by both the wake attempt and the no-player hint below.
+        candidates = _filter_candidates(_wake_candidates(hass), self._wake_entities)
 
         target = _match_session(sessions, player)
         if target is None:
+            wake, wake_note = self._wake_target(candidates, player)
+            if wake is None and wake_note:
+                return await self._fail(wake_note, player=player)
+            if wake is not None:
+                entity_id, app = wake
+                try:
+                    target = await _wake_and_wait(hass, self._client, entity_id, app)
+                except Exception as e:
+                    return await self._fail(
+                        f"Wake failed: {type(e).__name__}: {e}", player=player, entity_id=entity_id,
+                    )
+                if target is None:
+                    return await self._fail(
+                        f"Launched '{entity_id}' but it never connected to "
+                        "Emby — is the device on and reachable?",
+                        player=player,
+                        entity_id=entity_id,
+                    )
+
+        if target is None:
             names = [_session_name(s) for s in _controllable(sessions)]
             available = ", ".join(names) if names else "none are connected right now"
-            return await self._fail(
-                f"No connected Emby player matches '{player}'. Available: "
-                f"{available}.",
-                player=player,
-            )
+            message = f"No connected Emby player matches '{player}'. Available: {available}."
+            # Teach the model the vocabulary that works: Android TV names wake.
+            # No hint for a picker that excluded every entity.
+            if candidates:
+                message += (
+                    " If the player is an Android TV, name it by its device or "
+                    "room name (e.g. 'living room') and it will be started "
+                    "automatically."
+                )
+            return await self._fail(message, player=player)
 
         try:
             await self._client.async_play(target["Id"], item_id)
@@ -526,8 +684,32 @@ class PlayEmbyTool(_EmbyTool):
                 item_id=item_id,
             )
         except Exception as e:
-            return await self._fail(f"Playback failed: {e}", player=player)
+            return await self._fail(f"Playback failed: {type(e).__name__}: {e}", player=player)
         return {"result": f"Playing on {_session_name(target)}."}
+
+    def _wake_target(
+        self, candidates: dict[str, str], player: str
+    ) -> tuple[tuple[str, str] | None, str]:
+        """What to launch for this player request: ((entity_id, app), note).
+
+        The one candidate androidtv player whose name shares words with the
+        request is launched with the default Emby client (WAKE_DEFAULT_APP).
+        (None, "") means nothing fits and the caller falls through to the
+        no-player error; (None, note) is a question the user must answer
+        (several players fit).
+        """
+        if not candidates:
+            return None, ""
+        hit, ambiguous = _match_wake_entity(candidates, player)
+        if hit is not None:
+            return (hit, WAKE_DEFAULT_APP), ""
+        if ambiguous:
+            listed = ", ".join(f"{eid} ({candidates[eid]})" for eid in ambiguous)
+            return None, (
+                f"'{player}' matches several Android TV players: {listed}. "
+                "Name one of them."
+            )
+        return None, ""
 
 
 # --- seams: the feature's subentry interface (see features.py) ----------------
@@ -540,13 +722,20 @@ async def async_extra_tools(hass, data: dict, record_failure=None) -> list[llm.T
     if not url or not api_key:
         return []  # subentry present but incomplete — send nothing
     client = EmbyClient(hass, url, api_key)
+    # Entity selector stores a plain list of entity ids (multiple=true) — an
+    # empty/missing selection means "no restriction", not "no wake".
+    raw_wake = data.get(CONF_WAKE_ENTITIES)
+    if isinstance(raw_wake, str):  # single-entity selection defensive normal form
+        wake_entities: list[str] | None = [raw_wake]
+    else:
+        wake_entities = raw_wake or None
     return [
         CountEmbyTool(client, record_failure),
         SearchEmbyTool(client, record_failure),
         RecentEmbyTool(client, record_failure),
         NowPlayingEmbyTool(client, record_failure),
         NextUpEmbyTool(client, record_failure),
-        PlayEmbyTool(client, record_failure),
+        PlayEmbyTool(client, record_failure, wake_entities),
     ]
 
 
@@ -565,6 +754,15 @@ def subentry_schema(data: dict) -> dict:
             CONF_EMBY_API_KEY,
             description={"suggested_value": data.get(CONF_EMBY_API_KEY, "")},
         ): str,
+        vol.Optional(
+            CONF_WAKE_ENTITIES,
+            description={"suggested_value": data.get(CONF_WAKE_ENTITIES)},
+        ): selector.EntitySelector(
+            selector.EntitySelectorConfig(
+                multiple=True,
+                filter={"domain": "media_player", "integration": "androidtv"},
+            )
+        ),
     }
 
 
