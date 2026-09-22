@@ -12,6 +12,7 @@ from custom_components.second_brain.const import (
     SUBENTRY_HA_DATA,
     SUBENTRY_LIBRARIAN,
     SUBENTRY_MCP,
+    SUBENTRY_SELF_IMPROVE,
 )
 
 
@@ -25,11 +26,12 @@ def _sub(subentry_type, data):
     return SimpleNamespace(subentry_type=subentry_type, data=data)
 
 
-def test_supported_subentry_types_are_the_four_features():
+def test_supported_subentry_types_are_the_features():
     types = features.supported_subentry_types()
     assert set(types) == {
         SUBENTRY_HA_DATA,
         SUBENTRY_LIBRARIAN,
+        SUBENTRY_SELF_IMPROVE,
         SUBENTRY_MCP,
         SUBENTRY_EMBY,
     }

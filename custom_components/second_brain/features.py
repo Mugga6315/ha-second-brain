@@ -12,7 +12,8 @@ Adding a feature is one module exposing the three seam functions and one line in
     async_validate(hass, data)             -> error string, or None if OK
     async_extra_tools(hass, data, rec)     -> list[llm.Tool]  (or omit: no tools)
 
-A feature with no LLM tools (the librarian only schedules a job) sets tools=None.
+A feature with no LLM tools (the librarian and the self-improver only schedule
+jobs) sets tools=None.
 """
 from __future__ import annotations
 
@@ -34,6 +35,7 @@ from .const import (
     SUBENTRY_HA_DATA,
     SUBENTRY_LIBRARIAN,
     SUBENTRY_MCP,
+    SUBENTRY_SELF_IMPROVE,
 )
 
 
@@ -51,7 +53,7 @@ class Feature:
 def _registry() -> list[Feature]:
     # Imported lazily so a partial deploy missing one module fails only that
     # feature's row, and so this module has no import cycle with the features.
-    from . import consolidator, emby, ha_data, mcp_proxy
+    from . import analyzer, consolidator, emby, ha_data, mcp_proxy
 
     return [
         Feature(
@@ -66,6 +68,13 @@ def _registry() -> list[Feature]:
             "Librarian (nightly consolidation)",
             consolidator.subentry_schema,
             consolidator.async_validate,
+            None,
+        ),
+        Feature(
+            SUBENTRY_SELF_IMPROVE,
+            "Self-improvement (reviews each turn)",
+            analyzer.subentry_schema,
+            analyzer.async_validate,
             None,
         ),
         Feature(

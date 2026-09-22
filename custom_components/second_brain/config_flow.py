@@ -33,11 +33,13 @@ from .const import (
     NOTE_CHARS,
     RULES_CHARS,
 )
+from .store_location import default_store_location, unsafe_store_location
 
 
 def _detect_locations(hass) -> list[dict]:
-    """Detect candidate store locations: config dir + network storage mounts."""
-    options = [{"value": hass.config.config_dir, "label": f"{hass.config.config_dir} (local)"}]
+    """Detect candidate store locations: own folder + network storage mounts."""
+    own = default_store_location(hass)
+    options = [{"value": own, "label": f"{own} (local, created for you)"}]
     for base in ("/share", "/media"):
         try:
             for entry in os.scandir(base):
@@ -130,6 +132,17 @@ class _BrainFlowSteps:
             self._llm_api_key = api_key
 
             store_path = user_input.get(CONF_STORE_LOCATION, "")
+            unsafe = await self.hass.async_add_executor_job(
+                unsafe_store_location, self.hass, store_path
+            )
+            if unsafe:
+                return self.async_show_form(
+                    step_id=self._first_step,
+                    data_schema=await self._init_schema(opts),
+                    errors={"base": "unsafe_store_location"},
+                    description_placeholders={"error": unsafe},
+                )
+
             existing = await self.hass.async_add_executor_job(
                 _detect_existing_store, store_path
             )
@@ -214,7 +227,9 @@ class _BrainFlowSteps:
 
     async def _init_schema(self, opts: dict) -> vol.Schema:
         locations = await self.hass.async_add_executor_job(_detect_locations, self.hass)
-        current_location = opts.get(CONF_STORE_LOCATION, self.hass.config.config_dir)
+        current_location = opts.get(
+            CONF_STORE_LOCATION
+        ) or default_store_location(self.hass)
         return vol.Schema(
             {
                 vol.Required(

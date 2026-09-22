@@ -1,7 +1,16 @@
 consolidate:
   name: Consolidate memories
   description: >-
-    Run the consolidation agent to merge raw memories into curated wiki pages,
-    triage misfiled rules and learn from recorded tool failures. Holds the
-    store lock for the whole run, so new memories queue until it finishes -
-    up to 10 minutes on a slow model. Returns a summary of what it changed.
+    Run the consolidation agent to merge raw memories into curated wiki pages
+    and triage misfiled rules. Holds the store lock for the whole run, so new
+    memories queue until it finishes - up to 10 minutes on a slow model.
+    Returns a summary of what it changed. Learning from recorded failures is a
+    separate action now: second_brain.learn.
+
+learn:
+  name: Learn from failures
+  description: >-
+    Run the self-improver's learning pass now: read the open entries in
+    failures.md, turn a repeated pattern into a rule in self_improving.md,
+    retract auto-rules that went wrong, and mark what it handled. Holds the
+    store lock for the run. Returns a summary of what it changed.

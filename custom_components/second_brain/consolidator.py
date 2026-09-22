@@ -11,7 +11,6 @@ from .store import _word_in, strip_bullet_prefix
 
 MAX_DELETE_LINES = 100
 MAX_RULE_MOVES = 5
-MAX_RULE_ADDS = 3
 
 # Statuses that mean "I do not accept that parameter", and nothing else. A 401
 # (bad key), 403, 404 or 429 says nothing about response_format, and treating
@@ -45,14 +44,19 @@ def _fact_is_in_wiki(fact: str, wiki_text: str) -> bool:
 
 
 class Consolidator:
-    def __init__(self, hass, store, base_url: str, api_key: str, model: str) -> None:
+    def __init__(
+        self, hass, store, base_url: str, api_key: str, model: str,
+        effort: str = "none",
+    ) -> None:
         self._hass = hass
         self._store = store
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._model = model
+        self._effort = effort
         self._running = asyncio.Lock()
         self._no_response_format = False
+        self._no_thinking = False
 
     async def async_schedule(self, now) -> None:
         """Called by the cron tracker."""
@@ -76,13 +80,12 @@ class Consolidator:
         """Inner implementation of async_run (caller holds store lock)."""
         memories = await self._store.async_read_all_memories()
         rules = await self._store.async_read_rules()
-        failures = await self._store.async_read_failures()
-        if not memories and not rules and not failures.strip():
+        if not memories and not rules:
             LOGGER.info("Consolidator: no memories to process")
             return "No memories to consolidate."
 
         wiki = await self._store.async_read_all_wiki()
-        prompt = await self._build_prompt(memories, wiki, rules, failures)
+        prompt = await self._build_prompt(memories, wiki, rules)
 
         try:
             response = await self._call_llm(prompt)
@@ -104,22 +107,13 @@ class Consolidator:
         wiki_updates = plan.get("wiki_updates", [])
         memories_to_clear = plan.get("memories_to_clear", [])
         rules_to_move = plan.get("rules_to_move", [])
-        rules_to_add = [
-            str(r.get("text", "")).strip()
-            for r in plan.get("rules_to_add", [])
-            if str(r.get("text", "")).strip()
-        ]
-        failures_acknowledged = [
-            f for f in plan.get("failures_acknowledged", [])
-            if str(f.get("containing", "")).strip()
-        ]
         lint_findings = [
             str(f) for f in plan.get("lint_findings", []) if str(f).strip()
         ]
 
         if (
             not wiki_updates and not memories_to_clear and not rules_to_move
-            and not rules_to_add and not failures_acknowledged and not lint_findings
+            and not lint_findings
         ):
             LOGGER.info("Consolidator: nothing to do")
             return "Nothing to consolidate."
@@ -147,13 +141,6 @@ class Consolidator:
                 len(rules_to_move), MAX_RULE_MOVES,
             )
             return f"Refusing to move {len(rules_to_move)} rules (cap {MAX_RULE_MOVES})."
-
-        if len(rules_to_add) > MAX_RULE_ADDS:
-            LOGGER.warning(
-                "Consolidator: refusing to add %d rules (cap %d), aborting",
-                len(rules_to_add), MAX_RULE_ADDS,
-            )
-            return f"Refusing to add {len(rules_to_add)} rules (cap {MAX_RULE_ADDS})."
 
         # Write wiki pages first so B3 validates clears against the wiki on disk
         written, cleared = [], []
@@ -216,27 +203,8 @@ class Consolidator:
             except ValueError as e:
                 LOGGER.warning("Consolidator: %s, skipping", e)
 
-        added = []
-        for text in rules_to_add:
-            if await self._store.async_add_rule(text):
-                added.append(text)
-            else:
-                LOGGER.debug("Consolidator: rule already present, skipping: %s", text)
-
-        # Acknowledged last: a failure is only marked handled once the rule or
-        # wiki page that handles it actually landed. Marking never deletes - the
-        # entry stays in failures.md for later debugging, it just stops being
-        # part of the backlog the next run reasons about.
-        acked = 0
-        for item in failures_acknowledged:
-            acked += await self._store.async_acknowledge_failure(
-                str(item["containing"]), str(item.get("note", ""))
-            )
-
         await self._store.async_append_log(
-            self._log_entry(
-                written, cleared, lint_findings, skipped_clears, moved, added, acked
-            )
+            self._log_entry(written, cleared, lint_findings, skipped_clears, moved)
         )
 
         await self._store._async_commit_unlocked(
@@ -246,12 +214,12 @@ class Consolidator:
         )
         LOGGER.info(
             "Consolidator: wrote %d wiki pages, cleared %d memory entries, "
-            "moved %d rules, added %d rules",
-            len(written), len(cleared), len(moved), len(added),
+            "moved %d rules",
+            len(written), len(cleared), len(moved),
         )
         return (
             f"Consolidated {len(written)} wiki pages, cleared {len(cleared)} "
-            f"memory entries, moved {len(moved)} rules, added {len(added)} rules."
+            f"memory entries, moved {len(moved)} rules."
         )
 
     async def _build_prompt(
@@ -259,7 +227,6 @@ class Consolidator:
         memories: dict[str, str],
         wiki: dict[str, str],
         rules: str = "",
-        failures: str = "",
     ) -> str:
         def _read_consolidate_md():
             import pathlib
@@ -279,11 +246,6 @@ class Consolidator:
                 "\n\n## Current rules (memories/rules.md) - triage only:\n"
                 f"\n```\n{rules}\n```"
             )
-        if failures.strip():
-            parts.append(
-                "\n\n## Recent tool failures (failures.md) - learn from these:\n"
-                f"\n```\n{failures}\n```"
-            )
         return "".join(parts)
 
     async def _call_llm(self, prompt: str) -> str:
@@ -302,6 +264,11 @@ class Consolidator:
             "stream": False,
             "temperature": 0.3,
         }
+        # Thinking is worth it here: the triage reasons about failure patterns in
+        # the background, with nobody waiting. "none" leaves it off.
+        if self._effort and self._effort != "none" and not self._no_thinking:
+            payload["reasoning_effort"] = self._effort
+            payload["chat_template_kwargs"] = {"enable_thinking": True}
         if not self._no_response_format:
             payload["response_format"] = {"type": "json_object"}
 
@@ -311,17 +278,18 @@ class Consolidator:
             json=payload,
             timeout=aiohttp.ClientTimeout(total=LLM_TIMEOUT_SECONDS),
         ) as resp:
-            if resp.status in _PARAM_REJECTED and "response_format" in payload:
-                self._no_response_format = True
-                async with session.post(
-                    f"{self._base_url}/chat/completions",
-                    headers=headers,
-                    json={k: v for k, v in payload.items() if k != "response_format"},
-                    timeout=aiohttp.ClientTimeout(total=LLM_TIMEOUT_SECONDS),
-                ) as retry_resp:
-                    retry_resp.raise_for_status()
-                    data = await retry_resp.json()
-                    return data["choices"][0]["message"]["content"]
+            # Both are optional extensions: drop the rejected one and retry, so
+            # an endpoint without JSON mode or without thinking still works.
+            if resp.status in _PARAM_REJECTED:
+                if "response_format" in payload:
+                    self._no_response_format = True
+                    return await self._call_llm(prompt)
+                if "reasoning_effort" in payload:
+                    LOGGER.info(
+                        "Consolidator: endpoint rejected thinking, retrying without"
+                    )
+                    self._no_thinking = True
+                    return await self._call_llm(prompt)
             resp.raise_for_status()
             data = await resp.json()
             return data["choices"][0]["message"]["content"]
@@ -333,8 +301,6 @@ class Consolidator:
         lint_findings: list[str],
         skipped_clears: list[dict] | None = None,
         moved: list[str] | None = None,
-        added: list[str] | None = None,
-        acked: int = 0,
     ) -> str:
         """One readable entry: what the run changed, what lint fixed, what was skipped."""
         lines = []
@@ -344,9 +310,6 @@ class Consolidator:
         if cleared:
             lines.append("Cleared from memories:")
             lines += [f"- {c}" for c in cleared]
-        if added:
-            lines.append("Learned from failures (added to rules):")
-            lines += [f"- {a}" for a in added]
         if moved:
             lines.append("Moved out of rules (not a behaviour rule):")
             lines += [f"- {m}" for m in moved]
@@ -355,8 +318,6 @@ class Consolidator:
             lines += [
                 f"- {s['path']} ({s['containing']})" for s in skipped_clears
             ]
-        if acked:
-            lines.append(f"Marked {acked} failure(s) in failures.md as handled.")
         if lint_findings:
             lines.append("Lint:")
             lines += [f"- {f}" for f in lint_findings]
@@ -381,12 +342,19 @@ class Consolidator:
 
 def subentry_schema(data: dict) -> dict:
     import voluptuous as vol
-    from homeassistant.helpers.selector import TimeSelector
+    from homeassistant.helpers.selector import (
+        SelectSelector,
+        SelectSelectorConfig,
+        TimeSelector,
+    )
 
     from .const import (
+        CONF_CONSOLIDATE_EFFORT,
         CONF_CONSOLIDATE_ENABLED,
         CONF_CONSOLIDATE_TIME,
         DEFAULT_CONSOLIDATE_TIME,
+        DEFAULT_SELF_IMPROVE_EFFORT,
+        SELF_IMPROVE_EFFORTS,
     )
 
     return {
@@ -397,6 +365,10 @@ def subentry_schema(data: dict) -> dict:
             CONF_CONSOLIDATE_TIME,
             default=data.get(CONF_CONSOLIDATE_TIME, DEFAULT_CONSOLIDATE_TIME),
         ): TimeSelector(),
+        vol.Required(
+            CONF_CONSOLIDATE_EFFORT,
+            default=data.get(CONF_CONSOLIDATE_EFFORT, DEFAULT_SELF_IMPROVE_EFFORT),
+        ): SelectSelector(SelectSelectorConfig(options=SELF_IMPROVE_EFFORTS)),
     }
 
 

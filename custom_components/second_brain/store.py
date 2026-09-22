@@ -60,11 +60,40 @@ def _is_hidden(rel: Path) -> bool:
 
 # Indexed and readable, but not searchable: a changelog contains every word that
 # ever passed through the store, so it matches every query and buries real notes.
-# failures.md is the same shape - it is the consolidator's input, not knowledge.
+# failures.md is the same shape - it is the self-improver's input, not knowledge.
+# The phrase that tells the analyzer a turn used this integration. It lives in
+# the injected prompt below; both sides must read it from here or a wording
+# change would silently stop every review.
+PROMPT_MARKER = "search_brain finds notes"
+
 _LOG_FILE = "log.md"
 _FAILURES_FILE = "failures.md"
-_UNSEARCHABLE = {_LOG_FILE, _FAILURES_FILE}
+# self_improving.md holds auto-learned rules; it is injected into every prompt
+# like rules.md, so searching it would surface it against itself.
+_SELF_IMPROVING_FILE = "self_improving.md"
+# not_a_defect.md is the human's veto over the self-improver: anything listed
+# there was reviewed and judged fine, so the analyzer must not flag it again and
+# no rule may be learned from it. Written by hand only - no agent writes here.
+_NOT_A_DEFECT_FILE = "not_a_defect.md"
+_UNSEARCHABLE = {
+    _LOG_FILE, _FAILURES_FILE, _SELF_IMPROVING_FILE, _NOT_A_DEFECT_FILE,
+}
 
+# Seeded once, then owned by the human. The header explains the file to whoever
+# opens it months later, because an empty file explains nothing.
+_NOT_A_DEFECT_SEED = """---
+title: not_a_defect
+tags: [not_a_defect]
+load_when: never - this file is for the self-improver, not for answering
+---
+
+Behaviour that was reviewed and judged correct. The per-turn review must not
+flag anything listed here, and no rule may be learned from it. One bullet per
+case, in plain words - say what the assistant did and why it is fine.
+
+- Repeating a tool call the user explicitly asked to repeat ("check again") is
+  correct, not a redundant call.
+"""
 # failures.md is never pruned. It is the debugging record of what the assistant
 # got wrong, and a mistake stays interesting long after it was fixed - "when did
 # this start" is only answerable if the entry survives. Handled entries are
@@ -199,9 +228,14 @@ class Store:
             index = self._root / "INDEX.md"
             if not index.exists():
                 index.write_text("# INDEX\n\n")
+            # Always rewritten: this file is the consolidator's prompt, shipped
+            # with the integration. Keeping an old copy means an upgraded
+            # consolidator runs last release's instructions.
             consolidate = self._root / "CONSOLIDATE.md"
-            if not consolidate.exists():
-                consolidate.write_text(_DEFAULT_CONSOLIDATE_PROMPT)
+            consolidate.write_text(_DEFAULT_CONSOLIDATE_PROMPT, encoding="utf-8")
+            accepted = self._root / "memories" / _NOT_A_DEFECT_FILE
+            if not accepted.exists():
+                accepted.write_text(_NOT_A_DEFECT_SEED, encoding="utf-8")
             self._init_git()
 
         await self._hass.async_add_executor_job(_setup)
@@ -302,11 +336,16 @@ class Store:
         return await self._hass.async_add_executor_job(self._search_sync, query)
 
     def _list_notes_sync(self, limit: int = 50) -> list[str]:
-        """Return relative paths of all user-facing .md files, capped at limit."""
+        """Return relative paths of all user-facing .md files, capped at limit.
+
+        The unsearchable files are the self-improver's own bookkeeping, not
+        notes: offering them here had the assistant reading its failure log back
+        to the user as an available note (observed live 2026-09-22).
+        """
         notes = []
         total = 0
         for fpath in sorted(self._root.rglob("*.md")):
-            if fpath.name in _MACHINERY_FILES:
+            if fpath.name in _MACHINERY_FILES or fpath.name in _UNSEARCHABLE:
                 continue
             if _is_hidden(fpath.relative_to(self._root)):
                 continue
@@ -355,9 +394,11 @@ class Store:
         return result
 
     async def async_read_all_memories(self) -> dict[str, str]:
-        """Read all memory files except rules.md."""
+        """Read all memory files except the injected-not-searched ones."""
         return await self._hass.async_add_executor_job(
-            self._read_dir_sync, "memories", {"rules.md"}
+            self._read_dir_sync,
+            "memories",
+            {"rules.md", _SELF_IMPROVING_FILE, _NOT_A_DEFECT_FILE},
         )
 
     async def async_read_all_wiki(self) -> dict[str, str]:
@@ -386,8 +427,9 @@ class Store:
         if not target.is_relative_to(mem_root):
             raise ValueError(f"Path outside memories/ denied: {path}")
         if target.name == "rules.md":
-            # The consolidator never reads rules.md, so it must not delete from it.
-            LOGGER.warning("consolidator tried to clear rules.md - ignored")
+            # No agent reads rules.md as its own file, so none may delete from
+            # it: it is the one file a human maintains by hand.
+            LOGGER.warning("an agent tried to clear rules.md - ignored")
             return 0
         if not target.exists():
             return 0
@@ -464,8 +506,8 @@ class Store:
     async def async_record_failure(self, tool: str, detail: str) -> None:
         """Note a tool call that could not be answered.
 
-        This is the raw signal for self-improvement: the nightly consolidator
-        reads it and may compile a repeated failure into a rule ("for solar use
+        This is the raw signal for self-improvement: the nightly learner reads
+        it and may compile a repeated failure into a rule ("for solar use
         sensor.pv_total"). No commit - a failed voice turn must not cost a git
         write; the next real write picks the file up.
         """
@@ -477,7 +519,7 @@ class Store:
             LOGGER.exception("could not record failure for %s", tool)
 
     async def async_read_failures(self, only_open: bool = True) -> str:
-        """failures.md as text. Consolidator input.
+        """failures.md as text. The learner's input.
 
         `only_open` hides entries already marked as handled, so a fixed mistake
         is not learned from twice and the prompt stays the size of the backlog
@@ -533,11 +575,12 @@ class Store:
     async def async_add_rule(self, text: str) -> bool:
         """Append one rule to rules.md. Returns False if it is already there.
 
-        Append-only on purpose: the consolidator may add a rule it learned from
-        failures, but it can never edit or delete one a human wrote.
+        Append-only on purpose: rules.md is the human's file. Auto-learned rules
+        go to self_improving.md via async_add_self_improving_rule - nothing here
+        may edit or delete a rule a human wrote.
 
-        # ponytail: no index regeneration, no commit - the consolidator holds
-        # async_locked() and does both once at the end of its run. A direct
+        # ponytail: no index regeneration, no commit - the caller is expected to
+        # hold async_locked() and do both once at the end of its run. A direct
         # caller would write a rule that is absent from INDEX.md until the next
         # nightly pass.
         """
@@ -552,6 +595,42 @@ class Store:
             return True
 
         return await self._hass.async_add_executor_job(_add)
+
+    async def async_add_self_improving_rule(self, text: str) -> bool:
+        """Append one auto-learned rule to self_improving.md. False if duplicate.
+
+        Unlike rules.md (human-owned, append-only), this file is fully the
+        learner's: it may add here and also retract via async_clear_memory, so a
+        rule that later proves harmful can be removed by the loop itself.
+        No commit - the learner holds async_locked() and commits at the end.
+        """
+        def _add() -> bool:
+            text_clean = " ".join(_clean_lines(text))
+            if not text_clean:
+                return False
+            path = self._root / "memories" / _SELF_IMPROVING_FILE
+            if path.exists() and self._has_bullet(path, text_clean):
+                return False
+            self._append_bullet("self_improving", text_clean)
+            return True
+
+        return await self._hass.async_add_executor_job(_add)
+
+    async def async_read_not_a_defect(self) -> str:
+        """not_a_defect.md as text: the human's list of accepted behaviour."""
+        def _read():
+            path = self._root / "memories" / _NOT_A_DEFECT_FILE
+            return path.read_text(encoding="utf-8") if path.exists() else ""
+
+        return await self._hass.async_add_executor_job(_read)
+
+    async def async_read_self_improving(self) -> str:
+        """self_improving.md as text, so the learner can retract stale rules."""
+        def _read():
+            path = self._root / "memories" / _SELF_IMPROVING_FILE
+            return path.read_text(encoding="utf-8") if path.exists() else ""
+
+        return await self._hass.async_add_executor_job(_read)
 
     @asynccontextmanager
     async def async_locked(self):
@@ -861,9 +940,22 @@ class Store:
                 parts.append(
                     "## Active rules - always follow these when answering:\n"
                     + _clip(
-                        rules.read_text(encoding="utf-8"),
+                        # Body only: the frontmatter is the store's bookkeeping,
+                        # and every header line would cost prompt budget on
+                        # every single turn.
+                        _parse_frontmatter(rules.read_text(encoding="utf-8"))[1],
                         self._rules_chars,
                         "rules.md - raise the rules budget in the options to see them",
+                    )
+                )
+            learned = self._root / "memories" / "self_improving.md"
+            if learned.exists():
+                parts.append(
+                    "## Learned rules (auto, from past turns) - follow these too:\n"
+                    + _clip(
+                        _parse_frontmatter(learned.read_text(encoding="utf-8"))[1],
+                        self._rules_chars,
+                        "self_improving.md",
                     )
                 )
             idx = self._root / "INDEX.md"
@@ -872,7 +964,7 @@ class Store:
                     _clip(idx.read_text(encoding="utf-8"), self._index_chars, "INDEX.md")
                 )
             parts.append(
-                "Memory tools: search_brain finds notes; read_note reads one; "
+                f"Memory tools: {PROMPT_MARKER}; read_note reads one; "
                 "add_memory ADDS a new fact; update_memory REPLACES a topic's stored "
                 "facts (use for corrections); forget DELETES memories. "
                 "Pick exactly one write tool per request - add_memory for new facts, "
@@ -947,8 +1039,8 @@ def _linked_notes(
 
 
 def _bullet_prefix(slug: str) -> str:
-    """Timestamp prefix for memory bullets; rules get none (git has dates)."""
-    if slug == "rules":
+    """Timestamp prefix for memory bullets; injected rule files get none (git has dates)."""
+    if slug in ("rules", "self_improving"):
         return ""
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M ")
 
@@ -1044,44 +1136,6 @@ moved out changes how the assistant behaves.
 Do not use `rules_to_move` to delete anything, to reword an entry, or to move a
 genuine rule to a "better" topic. Its only purpose is fact-out-of-rules.
 
-## Learning from failures
-
-`failures.md` lists tool calls the assistant made that could not be answered:
-the tool, the arguments, and the error it got back. Nobody reads it during a
-conversation - it exists so that you can turn a repeated mistake into a rule the
-assistant *does* read, on every turn, before it acts.
-
-Only act on a pattern, never on a one-off. Two or more failures of the same
-shape, with a fix you can state in one sentence, earn a rule:
-
-- `get_statistics entity_id='sensor.solar_production_today' -> No long-term
-  statistics for ...` three times, and the store knows the real meter is
-  `sensor.pv_total` -> rule: "for solar production use sensor.pv_total, the
-  template sensor has no statistics".
-- `get_statistics ... 'start' must be before 'end'` repeatedly -> rule: "call
-  GetDateTime before building any relative time range".
-
-Emit those as `rules_to_add` items. They are appended to rules.md and nothing
-else - you cannot edit or delete a rule a human wrote, so an added rule is
-always safe but also always permanent-until-a-human-removes-it. That is why the
-bar is high: at most 3 per run, and only when the rule would actually have
-prevented the failures you can see.
-
-Do not add a rule that restates a tool description, one you cannot support with
-entries in failures.md, or one that is really a fact (that is a wiki page). If
-failures.md is empty or shows no pattern, return `"rules_to_add": []`.
-
-**Acknowledge what you handled.** For every failure you turned into a rule or a
-wiki page, emit a `failures_acknowledged` item: a `containing` snippet matching
-those entries, and a short `note` saying what you did about it. The entry is
-**marked, never deleted** - failures.md is the debugging record of what the
-assistant got wrong and when, and that stays valuable long after the fix. The
-mark is only what keeps a solved problem out of the next run's backlog: you are
-shown open failures only, so anything you acknowledge you will not see again.
-
-Never acknowledge a failure you did nothing about. An unacknowledged entry is
-how the next run knows the problem is still open.
-
 ## Lint
 While merging, also check the wiki you were given and fix what is wrong:
 - Two pages stating the same fact differently: keep the newer, mark the older
@@ -1105,18 +1159,11 @@ Return JSON only, no markdown fences:
   "rules_to_move": [
     {"containing": "Mülltonne", "to_topic": "muell"}
   ],
-  "rules_to_add": [
-    {"text": "for solar production use sensor.pv_total, the template sensor has no statistics"}
-  ],
-  "failures_acknowledged": [
-    {"containing": "sensor.solar_production_today", "note": "rule added: use sensor.pv_total"}
-  ],
   "lint_findings": [
     "wiki/solar.md: marked the 2025 inverter capacity superseded by the June entry"
   ]
 }
 
 If nothing needs consolidating, return:
-{"wiki_updates": [], "memories_to_clear": [], "rules_to_move": [],
- "rules_to_add": [], "failures_acknowledged": [], "lint_findings": []}
+{"wiki_updates": [], "memories_to_clear": [], "rules_to_move": [], "lint_findings": []}
 """

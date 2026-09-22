@@ -27,7 +27,8 @@
       }
     },
     "error": {
-      "llm_unreachable": "LLM endpoint validation failed: {error}"
+      "llm_unreachable": "LLM endpoint validation failed: {error}",
+      "unsafe_store_location": "{error}"
     },
     "abort": {
       "already_configured": "Second Brain is already configured. Only one instance is supported."
@@ -61,7 +62,8 @@
       }
     },
     "error": {
-      "llm_unreachable": "LLM endpoint validation failed: {error}"
+      "llm_unreachable": "LLM endpoint validation failed: {error}",
+      "unsafe_store_location": "{error}"
     }
   },
   "config_subentries": {
@@ -98,7 +100,8 @@
           "description": "Nightly consolidation of memories into the wiki. Uses the global LLM configured on Second Brain.",
           "data": {
             "consolidate_enabled": "Enable nightly consolidation",
-            "consolidate_time": "Time to run nightly consolidation"
+            "consolidate_time": "Time to run nightly consolidation",
+            "consolidate_effort": "Thinking effort for the nightly run"
           }
         },
         "reconfigure": {
@@ -106,7 +109,8 @@
           "description": "Uses the global LLM configured on Second Brain.",
           "data": {
             "consolidate_enabled": "Enable nightly consolidation",
-            "consolidate_time": "Time to run nightly consolidation"
+            "consolidate_time": "Time to run nightly consolidation",
+            "consolidate_effort": "Thinking effort for the nightly run"
           }
         }
       },
@@ -162,7 +166,7 @@
           "data": {
             "emby_url": "Emby server URL (e.g. http://localhost:8096)",
             "emby_api_key": "Emby API key (Emby dashboard > API Keys)",
-            "wake_entities": "Android TV players (optional \u2014 leave empty to wake any Android TV automatically; pick players to restrict wake to exactly these)"
+            "wake_entities": "Android TV players (optional — leave empty to wake any Android TV automatically; pick players to restrict wake to exactly these)"
           }
         },
         "reconfigure": {
@@ -171,12 +175,41 @@
           "data": {
             "emby_url": "Emby server URL (e.g. http://localhost:8096)",
             "emby_api_key": "Emby API key (Emby dashboard > API Keys)",
-            "wake_entities": "Android TV players (optional \u2014 leave empty to wake any Android TV automatically; pick players to restrict wake to exactly these)"
+            "wake_entities": "Android TV players (optional — leave empty to wake any Android TV automatically; pick players to restrict wake to exactly these)"
           }
         }
       },
       "error": {
         "cannot_connect": "Emby server validation failed: {error}"
+      },
+      "abort": {
+        "reconfigure_successful": "Re-configuration was successful",
+        "already_configured": "This feature is already added. Remove or reconfigure the existing one."
+      }
+    },
+    "self_improve": {
+      "entry_type": "Self-improvement",
+      "initiate_flow": {
+        "user": "Add self-improvement",
+        "reconfigure": "Reconfigure self-improvement"
+      },
+      "step": {
+        "user": {
+          "title": "Self-improvement (reviews each turn)",
+          "description": "Reviews every assist turn in the background and notes misfires and detours (a correct answer that took more tool calls than it needed). A nightly pass turns repeated notes into rules the assistant reads on every turn. One LLM call per turn, on the global LLM configured on Second Brain.",
+          "data": {
+            "self_improve_effort": "Thinking effort for the review",
+            "learn_time": "Time to turn the notes into rules"
+          }
+        },
+        "reconfigure": {
+          "title": "Self-improvement (reviews each turn)",
+          "description": "Uses the global LLM configured on Second Brain.",
+          "data": {
+            "self_improve_effort": "Thinking effort for the review",
+            "learn_time": "Time to turn the notes into rules"
+          }
+        }
       },
       "abort": {
         "reconfigure_successful": "Re-configuration was successful",

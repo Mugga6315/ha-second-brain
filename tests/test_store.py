@@ -645,3 +645,46 @@ async def test_tags_are_written_as_a_yaml_list(store):
         "---\ntitle: garten\ntags: garten, hecke\n---\nThe hedge is cut in September.\n"
     )
     assert any(r["path"] == "wiki/garten.md" for r in await store.async_search("hecke"))
+
+
+async def test_not_a_defect_is_seeded_and_kept_out_of_memories(hass, tmp_path):
+    """Human-owned veto file: readable on its own, never part of memory reads."""
+    from custom_components.second_brain.store import Store
+
+    store = Store(hass, str(tmp_path))
+    await store.async_setup()
+
+    accepted = await store.async_read_not_a_defect()
+    assert "not_a_defect" in accepted
+    assert "check again" in accepted  # the seeded example
+    assert "not_a_defect.md" not in await store.async_read_all_memories()
+
+
+async def test_listing_notes_hides_the_self_improver_bookkeeping(hass, tmp_path):
+    """A search miss lists notes - failures.md and friends are not notes."""
+    from custom_components.second_brain.store import Store
+
+    store = Store(hass, str(tmp_path))
+    await store.async_setup()
+    await store.async_add_memory("guest wifi is banana123", topic="wifi")
+    await store.async_record_failure("read_note", "path='wiki/nope.md' -> not found")
+    await store.async_add_self_improving_rule("use sensor.pv_total for solar")
+
+    notes = await store.async_list_notes()
+    assert "memories/wifi.md" in notes
+    for hidden in ("failures.md", "log.md", "memories/self_improving.md",
+                   "memories/not_a_defect.md"):
+        assert hidden not in notes
+
+
+async def test_consolidate_prompt_is_refreshed_on_setup(hass, tmp_path):
+    """The prompt ships with the integration - an old copy must not survive."""
+    from custom_components.second_brain.store import Store
+
+    store = Store(hass, str(tmp_path))
+    await store.async_setup()
+    (store._root / "CONSOLIDATE.md").write_text("last release's instructions\n")
+
+    await store.async_setup()
+    assert "last release" not in (store._root / "CONSOLIDATE.md").read_text()
+    assert "wiki_updates" in (store._root / "CONSOLIDATE.md").read_text()
