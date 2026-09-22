@@ -161,7 +161,8 @@
           "description": "Lets the assistant search your Emby library and start playback on a player.",
           "data": {
             "emby_url": "Emby server URL (e.g. http://localhost:8096)",
-            "emby_api_key": "Emby API key (Emby dashboard > API Keys)"
+            "emby_api_key": "Emby API key (Emby dashboard > API Keys)",
+            "wake_entities": "Android TV players (optional \u2014 leave empty to wake any Android TV automatically; pick players to restrict wake to exactly these)"
           }
         },
         "reconfigure": {
@@ -169,7 +170,8 @@
           "description": "Lets the assistant search your Emby library and start playback on a player.",
           "data": {
             "emby_url": "Emby server URL (e.g. http://localhost:8096)",
-            "emby_api_key": "Emby API key (Emby dashboard > API Keys)"
+            "emby_api_key": "Emby API key (Emby dashboard > API Keys)",
+            "wake_entities": "Android TV players (optional \u2014 leave empty to wake any Android TV automatically; pick players to restrict wake to exactly these)"
           }
         }
       },

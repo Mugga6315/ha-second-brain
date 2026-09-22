@@ -24,6 +24,7 @@ from custom_components.second_brain.emby import (
     _match_session,
     _match_wake_entity,
     _playstate,
+    _session_on_host,
     _scope,
 )
 
@@ -449,15 +450,88 @@ async def test_play_emby_wake_entities_restrict_wake_to_picked_players(monkeypat
     hass = _FakeHass()
     client = _FakeClient(sessions=[])
 
-    # "bedroom" only wakes when Bedroom Shield is picked; unpicked -> no launch,
-    # but the hint stays: it steers the model toward a name that WILL work.
-    tool = PlayEmbyTool(client, wake_entities=["media_player.shield"])
-    result = await _call(tool, hass=hass, item_id="m1", player="bedroom")
+    # Two picked players still need the request to name one of them.
+    tool = PlayEmbyTool(
+        client,
+        wake_entities=["media_player.shield", "media_player.shield_bedroom"],
+    )
+    result = await _call(tool, hass=hass, item_id="m1", player="kitchen")
     assert hass.calls == []
     assert "name it by its device or room name" in result["error"]
 
     picked = PlayEmbyTool(_WakeClient(connect_after=3), wake_entities=["media_player.shield_bedroom"])
     result = await _call(picked, hass=_FakeHass(), item_id="m1", player="bedroom")
+    assert "Playing on" in result["result"]
+
+
+async def test_play_emby_single_picked_player_wakes_whatever_the_request_calls_it(
+    monkeypatch,
+):
+    """One player picked in the config = the target, name match or not."""
+    import custom_components.second_brain.emby as emby
+
+    monkeypatch.setattr(emby, "WAKE_POLL_S", 0)
+    monkeypatch.setattr(
+        emby, "_wake_candidates",
+        lambda hass: {
+            "media_player.shield": "Living Room Shield",
+            "media_player.shield_bedroom": "Bedroom Shield",
+        },
+    )
+    hass = _FakeHass()
+    client = _WakeClient(connect_after=3)
+    tool = PlayEmbyTool(client, wake_entities=["media_player.shield"])
+    result = await _call(tool, hass=hass, item_id="m1", player="kodi")
+    assert hass.calls == [
+        ("media_player", "select_source",
+         {"entity_id": "media_player.shield", "source": WAKE_DEFAULT_APP}, True),
+    ]
+    assert "Playing on" in result["result"]
+
+
+async def test_play_emby_error_lists_the_players_that_can_be_started(monkeypatch):
+    import custom_components.second_brain.emby as emby
+
+    monkeypatch.setattr(
+        emby, "_wake_candidates",
+        lambda hass: {"media_player.shield": "Living Room Shield"},
+    )
+    client = _FakeClient(sessions=[])
+    result = await _call(PlayEmbyTool(client), hass=_FakeHass(), item_id="m1", player="receiver")
+    assert "Players that can be started: Living Room Shield" in result["error"]
+    assert "Other media players cannot run Emby" in result["error"]
+
+
+def test_session_on_host_matches_the_device_address():
+    sessions = [
+        {"Id": "s1", "RemoteEndPoint": "192.168.1.5", "SupportsRemoteControl": False},
+        {"Id": "s2", "RemoteEndPoint": "192.168.1.9", "SupportsRemoteControl": True},
+    ]
+    assert _session_on_host(sessions, "192.168.1.9")["Id"] == "s2"
+    assert _session_on_host(sessions, "192.168.1.5") is None  # not controllable
+    assert _session_on_host(sessions, None) is None
+
+
+async def test_play_emby_plays_an_already_online_player_without_launching(monkeypatch):
+    """Kodi running under a name the request does not use: play, do not relaunch."""
+    import custom_components.second_brain.emby as emby
+
+    monkeypatch.setattr(
+        emby, "_wake_candidates",
+        lambda hass: {"media_player.shield": "Living Room Shield"},
+    )
+    monkeypatch.setattr(emby, "_entity_host", lambda hass, entity_id: "192.168.1.9")
+    hass = _FakeHass()
+    client = _FakeClient(
+        sessions=[{
+            "Id": "s2", "DeviceName": "SHIELD-ATV", "Client": "Kodi",
+            "RemoteEndPoint": "192.168.1.9", "SupportsRemoteControl": True,
+        }]
+    )
+    tool = PlayEmbyTool(client, wake_entities=["media_player.shield"])
+    result = await _call(tool, hass=hass, item_id="m1", player="living room")
+    assert hass.calls == []  # already online — nothing launched
+    assert client.played == ("s2", "m1")
     assert "Playing on" in result["result"]
 
 

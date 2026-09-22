@@ -316,16 +316,43 @@ def _match_session(sessions: list[dict], player: str) -> dict | None:
     return None
 
 
+def _session_on_host(sessions: list[dict], host: str | None) -> dict | None:
+    """The controllable session connecting from `host` — the device's own IP.
+
+    Emby reports each session's client address as RemoteEndPoint; the androidtv
+    entity knows its device's ADB host. Same address = that device's player is
+    already online, whatever name it reports.
+    """
+    if not host:
+        return None
+    for s in _controllable(sessions):
+        if s.get("RemoteEndPoint") == host:
+            return s
+    return None
+
+
+def _entity_host(hass, entity_id: str) -> str | None:
+    """The ADB host of an androidtv entity's config entry, or None if unknown."""
+    from homeassistant.helpers import entity_registry as er
+
+    try:
+        entry = er.async_get(hass).async_get(entity_id)
+        config_entry = hass.config_entries.async_get_entry(entry.config_entry_id)
+        return config_entry.data.get("host")
+    except Exception:
+        return None  # unknown host only disables the IP match, not the wake
+
+
 async def _wake_and_wait(
-    hass, client: EmbyClient, entity_id: str, app: str
+    hass, client: EmbyClient, entity_id: str, app: str, host: str | None = None
 ) -> dict | None:
     """Launch the player via the androidtv integration, then wait for its session.
 
     The player's session is the one that *appears* after the launch — its name
-    (whatever the client reports) need not match the request wording. Existing
-    sessions are snapshotted first, and the first new controllable session
-    within WAKE_TIMEOUT_S wins; None after that is the honest failure the tool
-    reports.
+    (whatever the client reports) need not match the request wording — or the
+    one connecting from the device's `host`. Existing sessions are snapshotted
+    first; the first match within WAKE_TIMEOUT_S wins, None after that is the
+    honest failure the tool reports.
     """
     try:
         before = {s.get("Id") for s in _controllable(await client.async_sessions())}
@@ -344,6 +371,9 @@ async def _wake_and_wait(
             sessions = await client.async_sessions()
         except Exception:
             continue  # server hiccup mid-wait — keep polling until the deadline
+        on_host = _session_on_host(sessions, host)
+        if on_host:
+            return on_host
         fresh = [s for s in _controllable(sessions) if s.get("Id") not in before]
         if fresh:
             return fresh[0]
@@ -609,11 +639,14 @@ class PlayEmbyTool(_EmbyTool):
     name = "play_emby"
     description = (
         "Start playing an Emby item on a player. Pass item_id (from search_emby) "
-        "and player — the name of the target player as shown in Emby (e.g. "
-        "'Living Room', 'Kodi', 'Shield'); a partial name is enough. A player "
-        "that is not connected yet is started automatically: the Kodi app is "
-        "launched on the matching Android TV, so the first play may take a "
-        "moment. If the player still cannot be reached, the reply says so."
+        "and player — the name of the target player as shown in Emby, or the "
+        "room/device name of its Android TV (e.g. 'Living Room', 'Kodi', "
+        "'Shield'); a partial name is enough. A player that is not connected yet "
+        "is started automatically by this tool: the Kodi app is launched on the "
+        "Android TV, so the first play may take a moment. Only Android TV (ADB) "
+        "players can be started — never try to start Emby through other media "
+        "players such as receivers. If the player cannot be reached, the reply "
+        "says so and names the players that can be started."
     )
     parameters = vol.Schema(
         {vol.Required("item_id"): str, vol.Required("player"): str}
@@ -648,12 +681,21 @@ class PlayEmbyTool(_EmbyTool):
                 return await self._fail(wake_note, player=player)
             if wake is not None:
                 entity_id, app = wake
-                try:
-                    target = await _wake_and_wait(hass, self._client, entity_id, app)
-                except Exception as e:
-                    return await self._fail(
-                        f"Wake failed: {type(e).__name__}: {e}", player=player, entity_id=entity_id,
-                    )
+                host = _entity_host(hass, entity_id)
+                # Emby may already be online on that device under a name the
+                # request does not use — then there is nothing to launch.
+                target = _session_on_host(sessions, host)
+                if target is None:
+                    try:
+                        target = await _wake_and_wait(
+                            hass, self._client, entity_id, app, host
+                        )
+                    except Exception as e:
+                        return await self._fail(
+                            f"Wake failed: {type(e).__name__}: {e}",
+                            player=player,
+                            entity_id=entity_id,
+                        )
                 if target is None:
                     return await self._fail(
                         f"Launched '{entity_id}' but it never connected to "
@@ -667,12 +709,15 @@ class PlayEmbyTool(_EmbyTool):
             available = ", ".join(names) if names else "none are connected right now"
             message = f"No connected Emby player matches '{player}'. Available: {available}."
             # Teach the model the vocabulary that works: Android TV names wake.
+            # Listing them keeps it from reaching for other media players.
             # No hint for a picker that excluded every entity.
             if candidates:
+                startable = ", ".join(name or eid for eid, name in candidates.items())
                 message += (
                     " If the player is an Android TV, name it by its device or "
-                    "room name (e.g. 'living room') and it will be started "
-                    "automatically."
+                    "room name and it will be started automatically. Players "
+                    f"that can be started: {startable}. Other media players "
+                    "cannot run Emby."
                 )
             return await self._fail(message, player=player)
 
@@ -696,10 +741,13 @@ class PlayEmbyTool(_EmbyTool):
         request is launched with the default Emby client (WAKE_DEFAULT_APP).
         (None, "") means nothing fits and the caller falls through to the
         no-player error; (None, note) is a question the user must answer
-        (several players fit).
+        (several players fit). A single configured player is always the target,
+        whatever the request calls it — the user picked it for exactly this.
         """
         if not candidates:
             return None, ""
+        if self._wake_entities and len(candidates) == 1:
+            return (next(iter(candidates)), WAKE_DEFAULT_APP), ""
         hit, ambiguous = _match_wake_entity(candidates, player)
         if hit is not None:
             return (hit, WAKE_DEFAULT_APP), ""
