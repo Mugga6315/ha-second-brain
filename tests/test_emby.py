@@ -9,6 +9,7 @@ from homeassistant.helpers import llm
 
 from custom_components.second_brain.emby import (
     FULL_LIMIT,
+    EmbyClient,
     SEARCH_LIMIT,
     WAKE_DEFAULT_APP,
     CountEmbyTool,
@@ -209,6 +210,28 @@ async def test_recent_emby_lists_and_passes_kind():
     result = await _call(tool, kind="watching")
     assert client.recent_args == ("watching", "all", SEARCH_LIMIT)
     assert "Dune [Movie] — in progress — id: a" in result["result"]
+
+
+class _ParamsClient(EmbyClient):
+    """EmbyClient that records the /Items query instead of sending it."""
+
+    def __init__(self) -> None:
+        super().__init__(None, "http://emby", "key")
+        self._user_id = "u"
+        self.params: dict | None = None
+
+    async def _get(self, path, params):
+        self.params = params
+        return {"Items": []}
+
+
+async def test_watching_asks_emby_for_resumable_episodes_last_played_first():
+    client = _ParamsClient()
+    await client.async_recent("watching", "series", SEARCH_LIMIT)
+    # A series is never started, its episodes are.
+    assert client.params["IncludeItemTypes"] == "Episode"
+    assert client.params["Filters"] == "IsResumable"
+    assert (client.params["SortBy"], client.params["SortOrder"]) == ("DatePlayed", "Descending")
 
 
 async def test_recent_emby_empty_message():

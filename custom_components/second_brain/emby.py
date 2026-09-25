@@ -40,12 +40,16 @@ _STATUS_FILTER = {
     "in_progress": "IsResumable",
 }
 # recent kind -> (playstate filter or None, sort field). Verified against Emby's
-# "Browsing the Library" wiki.
+# "Browsing the Library" wiki; "watching" order live-verified against the Kodi
+# resume row (2026-09-25).
 _RECENT = {
     "watching": ("IsResumable", "DatePlayed"),
     "played": ("IsPlayed", "DatePlayed"),
     "added": (None, "DateCreated"),
 }
+
+# What is resumable per item_type: a series is never started, its episodes are.
+_RESUME_TYPE_MAP = {"movie": "Movie", "series": "Episode", "all": "Movie,Episode"}
 
 # Default page for a list — plenty for "what do I have" without flooding the
 # prompt. full=true raises it to FULL_LIMIT.
@@ -182,6 +186,10 @@ class EmbyClient:
             "SortBy": sort_by,
             "SortOrder": "Descending",
         }
+        if kind == "watching":
+            params["IncludeItemTypes"] = _RESUME_TYPE_MAP.get(
+                item_type, _RESUME_TYPE_MAP["all"]
+            )
         if playstate_filter:
             params["Filters"] = playstate_filter
         data = await self._user_items(params)
@@ -550,8 +558,11 @@ class RecentEmbyTool(_EmbyTool):
     name = "recent_emby"
     description = (
         "Recently-active titles for the Emby user, newest first. kind='watching' "
-        "for started-but-unfinished (continue watching), 'played' for recently "
-        "finished, 'added' for newly added to the library. Optional item_type "
+        "= started but not finished, ordered by when it was last started — the "
+        "first entry is what the user watched last. ALWAYS use 'watching' for "
+        "resume / continue / 'weiter schauen' / 'zuletzt geschaut' / 'what was I "
+        "watching'. 'played' lists only FINISHED titles, never use it to resume. "
+        "'added' = newly added to the library. Optional item_type "
         "('movie', 'series', 'all'). Each title shows its watch state and an id "
         "for play_emby."
     )
